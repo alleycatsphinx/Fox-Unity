@@ -1,0 +1,483 @@
+#pragma target 5.0
+
+#pragma kernel Initialize
+#pragma kernel Update
+#pragma kernel Flow
+#pragma kernel Field
+#pragma kernel Bitmap
+
+#include "Includes\configuration.cginc"
+#include "Includes\bitwise.cginc"
+#include "Includes\map.cginc"
+#include "Includes\encoding.cginc"
+#include "Includes\hashes.cginc"
+#include "Includes\hexeract.cginc"
+#include "Includes\spherical_fibonacci.cginc"
+#include "Includes\colorgradients.cginc"
+#include "Includes\equidistribution.cginc"
+#include "Includes\fields.cginc"
+#include "Includes\sobel.cginc"
+#include "Includes\sim_input.cginc"
+
+#define SIM_INITIALIZE
+#define SIM_UPDATE
+#define SIM_FLOW
+//#define SIM_FIELD
+#define SIM_BITMAP
+
+
+float3 safe_normalize(float3 v)
+{
+	// return normalize(v);
+	return v * max(.001, 1./sqrt(dot(v, v)));
+    // return clamp(v * max(.001, 1./sqrt(dot( v, v))), float3(-1., -1., -1.), float3(1., 1., 1.));
+}
+ 
+float3 isvalid(float3 v)
+{
+	return !(dot(v, v) == 0 || isinf(v.x) || isinf(v.y) || isinf(v.z));
+}
+ 
+float3 wrap(float3 position)
+{
+	return fmod(position + 1.5, 1.) - .5;
+	// return position - floor(position + .5);
+}
+
+void bound_box(inout StructTensor tensor)
+{	
+	float scale = CPU.sim.bounds.radius * .5;
+	bool outX = (tensor.position.x <= -scale || tensor.position.x >= scale);
+	bool outY = (tensor.position.y <= -scale || tensor.position.y >= scale);
+	bool outZ = (tensor.position.z <= -scale || tensor.position.z >= scale);
+
+	scale *= .99;
+	if (outX)
+	{
+	    tensor.velocity.x *= -1.0 * CPU.sim.field.restitution;
+	    tensor.position.x = clamp(tensor.position.x, -scale, scale);
+	} 
+
+	if (outY)
+	{
+	    tensor.velocity.y *= -1.0 * CPU.sim.field.restitution;
+	    tensor.position.y = clamp(tensor.position.y, -scale, scale);
+	}
+
+	if (outZ)
+	{
+	    tensor.velocity.z *= -1.0 * CPU.sim.field.restitution;
+	    tensor.position.z = clamp(tensor.position.z, -scale, scale);
+	}
+
+	if(outX || outY || outZ)
+	{
+		tensor.position.xyz *= CPU.sim.field.force;
+	}
+}
+
+
+void map_collision(inout StructTensor tensor)
+{	
+ 	float epsilon                       = .0000001;    
+    float distance                      = map(tensor.position.xyz);
+    
+  	if(distance < CPU.sim.field.threshold)
+    {           	
+        float3 direction 				= tensor.velocity.xyz;
+		
+		float3 normal 					= derivative(tensor.position.xyz, epsilon);
+		
+		float3 position 				= tensor.position.xyz + normal * CPU.sim.field.restitution;
+        tensor.velocity.xyz           	= reflect(direction, normal) * CPU.sim.field.force + normal * CPU.sim.field.restitution;
+    }
+} 
+
+
+
+float map_bounds(in float3 position)
+{
+	return CPU.sim.bounds.radius - length(position);
+}
+
+
+void bound_sphere(inout StructTensor tensor)
+{	   
+	// bound_box(tensor);
+    float radius 						= CPU.sim.bounds.radius;
+    float distance						= map_bounds(tensor.position.xyz);
+    
+    if(distance < 0.)
+    {           	
+    	float epsilon 					= .000001;
+        float2 offset                   = float2(-epsilon, epsilon);
+        float4 simplex                  = float4(0.,0.,0.,0.);        
+        simplex.x                       = map_bounds(tensor.position.xyz + offset.xyy);
+        simplex.y                       = map_bounds(tensor.position.xyz + offset.yyx); 
+        simplex.z                       = map_bounds(tensor.position.xyz + offset.yxy);
+        simplex.w                       = map_bounds(tensor.position.xyz + offset.xxx);
+        float3 grad                     = offset.xyy * simplex.x + offset.yyx * simplex.y + offset.yxy * simplex.z + offset.xxx * simplex.w;    
+        float4 derivative               = float4(grad, .2 * rcp(epsilon) * (dot(simplex, float4(1.,1.,1.,1.)) - 4. * distance));
+
+        derivative.xyz                  = normalize(tensor.position.xyz);//safe_normalize(derivative.xyz);        
+        tensor.position.xyz           	= tensor.position.xyz + derivative.xyz * distance * CPU.sim.bounds.restitution;
+
+        float incidence 				= dot(normalize(tensor.velocity.xyz), derivative.xyz);
+        if(incidence < 0.)
+		{
+			float e 					= CPU.sim.bounds.force;  //bounciness
+        	tensor.velocity.xyz 		+= tensor.velocity.xyz - (1. + e) * incidence * derivative.xyz;
+        	// tensor.velocity.xyz 	 	= reflect(tensor.velocity.xyz, derivative.xyz);
+		}        
+    }
+    else
+    {
+    }
+}
+
+
+#ifdef SIM_INITIALIZE
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Initialize(uint thread : SV_DispatchThreadID)
+{	
+	float seed  		= ((CPU.status.frame + thread) ^ 2654435761);
+
+	float4 position 	= float4(0.,0.,0.,1.);
+
+	position.xyz 		= spherical_fibonacci(thread, TENSOR_COUNT).yzx * (.75+.5*hash(.5 * seed + seed*.00000001));
+
+	// position.xyz 		= spherical_fibonacci(thread, TENSOR_COUNT).yzx;
+	// position.xyz 		= lerp(spherical_fibonacci(r, TENSOR_COUNT).yzx, spherical_fibonacci(q, TENSOR_COUNT).yzx, hash(seed));
+	// position.xyz 		= CPU.field.function == 0 ? hash(equidistribute_cube(seed)) - .5
+	// 					: CPU.field.function == 1 ? spherical_fibonacci(thread, TENSOR_COUNT).yzx
+	// 					: 							lerp(spherical_fibonacci(thread, TENSOR_COUNT).yzx, spherical_fibonacci(TENSOR_COUNT-thread-1, TENSOR_COUNT).yzx, hash(seed));
+
+	position 			*= .45;
+ 
+	StructTensor tensor;
+	tensor.position 	= position;
+	tensor.velocity		= float4(0.,0.,0.,0.);
+	tensor.state		= float4(thread%5,0.,0.,0.);
+	tensor.color		= float4(1., 1., 1., 1.) * .125; //float4(rainbow(float(thread) * rcp(TENSOR_COUNT)), 1.);
+	// tensor.color		= float4(normalize(tensor.position.xyz) * .5 + .25, 1.);
+	tensor.prior		= tensor.position;
+	tensor.prior1		= tensor.position;
+	tensor.prior2		= tensor.position;
+	tensor.temperature	= .0;
+	tensor.temp			= 0;
+
+	tensor.address		= thread;
+	tensor.count		= 0;
+
+	_Tensor[thread]		= tensor;
+	_Tensor_Map[thread]	= thread;
+
+	StructEdge edge;
+	uint address 		= 0;
+	[unroll]
+	for(int i = 0; i < EDGE_COUNT; i++)
+	{
+		seed 			= permute(seed, TENSOR_COUNT);
+		edge.address[i] = seed % TENSOR_COUNT;
+	}
+
+	_Edge[thread]		= edge;
+}
+#else
+[numthreads(1, 1, 1)]i
+void Initialize(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+#ifdef SIM_UPDATE
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Update(uint thread : SV_DispatchThreadID) 
+{ 		
+	StructTensor tensor 			= _Tensor[thread];
+   
+	//TRAIL
+	tensor.prior2.xyz 				= tensor.prior1.xyz;
+	tensor.prior1.xyz 				= tensor.prior.xyz;
+	tensor.prior.xyz 				= tensor.position.xyz;
+
+
+	////COLOR
+	float3 type						= rainbow(1.-tensor.state.x * rcp(5.)) * sin(.2+tensor.state.x) * clamp(tensor.state.x, 0.01, 1.);
+	float3 density  				= rainbow(1.-clamp(CPU.sim.color.density_delta*tensor.position.w, 0., 1.)) * .975;;
+	float3 direction 				= normalize(tensor.velocity.xyz)*.5+.25;
+	float3 temperature 				= rainbow(sin(1.-pow( tensor.temperature, CPU.sim.color.temperature_delta)));
+	float3 delta 					= float3(.0, .0, .5);
+
+	float3 color_out 				= type 		  * CPU.sim.color.type
+									+ density 	  * CPU.sim.color.density
+									+ direction   * CPU.sim.color.direction //; <- compiler bug here ;o
+									+ temperature * CPU.sim.color.temperature;
+
+									// + delta 	* component[3];
+	// color_out						*= 1.+5.*length(tensor.position.xyz-tensor.prior.xyz)/length(tensor.prior.xyz-tensor.prior1.xyz);
+	color_out						= pow(color_out, float3(1., 1., 1.) * CPU.sim.color.gamma) * CPU.sim.color.brightness;
+
+
+	if(length(color_out) > .0001)
+	{
+		tensor.color.xyz 			= clamp(tensor.color.xyz, 0., 1.);
+
+		tensor.color.xyz			= lerp(tensor.color.xyz, color_out, CPU.sim.color.interpolant);	
+
+		tensor.color.w 				= max(tensor.color.w, 0.);	
+	}
+	////
+
+
+	////INPUT FORCES
+	if(CPU.mouse.buttons != 0x00000000)
+	{		
+		GPU.sim.input.length 				= min(CPU.sim.input.length, GPU.sim.input.length + CPU.sim.input.velocity);
+		
+		if(CPU.sim.input.length >= 0.)
+		{			
+			float range 					= map_input_force(tensor.position.xyz);
+
+			if(range < 0.)
+			{			
+				float3 direction 			= GPU.sim.input.radius >= 0. ? derivative_input_force(tensor.position.xyz, .0001)
+											:  						  derivative_input_force_ball(tensor.position.xyz, .0001);
+
+				direction 					= normalize(direction);
+
+				tensor.velocity.xyz 		-= direction * (range) * CPU.sim.input.amplitude;
+				tensor.temperature	 		+= CPU.sim.input.temperature;
+			}
+		}				
+		else
+		{			
+			float range 					= map_sobel_force(tensor.position.xyz);
+			if(range < 0.)
+			{			
+				float3 direction 			= normalize(derivative_input_force(tensor.position.xyz, .0001));
+				tensor.velocity.xyz 		-= direction * (range) * CPU.sim.input.amplitude;
+				tensor.temperature	 		+= CPU.sim.input.temperature;
+			}
+		}		
+	}
+	else
+	{
+		GPU.sim.input.length 				= max(0., GPU.sim.input.length - CPU.sim.input.velocity);
+	}
+	////
+	
+
+
+	tensor.velocity.xyz 			+= float3(0., 1., 0.) * CPU.sim.field.gravity;
+
+
+
+	////BOUNDS	
+	if(CPU.sim.bounds.function == 0)
+	{
+		bound_sphere(tensor);
+	}
+	else
+	{
+		bound_box(tensor);	
+	}
+	////
+
+
+	//MOVE
+	tensor.position.xyz  			+= tensor.velocity.xyz;
+
+
+	_Tensor[thread]					= tensor;
+}
+#else
+[numthreads(1, 1, 1)]
+void Update(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+#ifdef SIM_FLOW
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Flow(uint thread : SV_DispatchThreadID)
+{	
+	StructTensor particle         	= _Tensor[thread];
+    StructEdge edge                 = _Edge[thread];
+        
+    float density                   = particle.position.w;
+
+	float simulation_velocity       = CPU.sim.flow.velocity;
+    float simulation_alignment      = CPU.sim.flow.alignment;
+    float simulation_repulsion      = CPU.sim.flow.avoidance;
+    float simulation_cohesion       = CPU.sim.flow.cohesion;
+
+	simulation_cohesion 			-= particle.state.x / 30.;
+	simulation_repulsion 			+= particle.state.x / 30.;
+
+    float threshold                 = CPU.sim.flow.threshold;
+    
+    float3 alignment                = float3(0., 0., 0.);
+    float3 repulsion                = float3(0., 0., 0.);
+    float3 cohesion                 = float3(0., 0., 0.);
+
+    float3 center 					= float3(0., 0., 0.);
+
+    float neighbor_count            = 0;
+    float neighbor_distance         = 0;  
+    float min_distance  			= 0xFFFFFFFF;
+    float max_distance  			= 0.; 
+	float temperature 	            = 0.;
+
+    StructTensor neighbor_particle;        
+    for(int i = 0; i < EDGE_COUNT; i++)
+    {
+        neighbor_particle           = _Tensor[edge.address[i]];
+        neighbor_distance           = length(particle.position.xyz - neighbor_particle.position.xyz);
+        
+        min_distance 				= min(min_distance, neighbor_distance);
+		max_distance 				= max(max_distance, neighbor_distance);
+
+        if(neighbor_distance > 0. && !isinf(neighbor_distance) && neighbor_distance < .5) 
+        {                 	
+            cohesion                += neighbor_particle.position.xyz;
+            center	 				+= neighbor_particle.position.xyz;			
+            temperature 			+= neighbor_particle.temperature;            
+            repulsion               += safe_normalize(particle.position.xyz - neighbor_particle.position.xyz);
+			alignment               += neighbor_particle.velocity.xyz * (1.-dot(neighbor_particle.velocity.xyz, particle.velocity.xyz));			
+          	neighbor_count          += 1.;
+        } 
+    } 
+ 
+    particle.position.w  			= abs(min_distance-max_distance);
+
+    ////forces  
+    float3 force                    = float3(0., 0., 0.);  	
+    if(neighbor_count > 0.) 
+    {   
+        float3 proportion           = float3(simulation_alignment, simulation_repulsion, simulation_cohesion);
+        proportion                  = safe_normalize(proportion);
+            
+        float count_norm            = rcp(neighbor_count);
+        cohesion                    *= count_norm;
+        repulsion                   *= count_norm;    
+        alignment                   *= count_norm;
+		temperature 				*= count_norm;
+		center						*= count_norm;
+
+		cohesion 					= cohesion.xyz - particle.position.xyz;
+		center 						=   center.xyz - particle.position.xyz; //////////////////////////interrupted!
+
+		// if(length(center.xyz) > CPU.debug.g)
+		// {
+		// 	particle.color.w 		+= .1;
+		// 	particle.color.w 		= clamp(particle.color.w, 0., 1.);
+		// }
+
+        alignment                   *= proportion.x;
+        repulsion                   *= proportion.y;
+        cohesion                    *= proportion.z;
+    
+        force                       = cohesion + repulsion + alignment; 
+        force 						= isvalid(force) ? force : particle.velocity.xyz;
+		
+		// particle.temperature		*= CPU.sim.flow.temperature; //ambient 
+		particle.temperature		= lerp(particle.temperature, temperature, CPU.sim.flow.convection) * CPU.sim.flow.dispersion;
+
+        force                       *= simulation_velocity * (1. + particle.temperature * CPU.sim.flow.temperature);
+
+        particle.velocity.xyz       += force;
+
+        particle.velocity.xyz 		*= CPU.sim.flow.decelleration;
+    }     
+
+	_Tensor[thread]       			= particle;        
+}
+#else
+[numthreads(1, 1, 1)]
+void Flow(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+#ifdef SIM_FIELD
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Field(uint thread : SV_DispatchThreadID) 
+{ 
+	StructTensor tensor 			= _Tensor[thread];
+
+	//gravity
+	tensor.velocity.xyz 			-= normalize(tensor.position.xyz) * length(tensor.position.xyz) * tensor.position.w * CPU.sim.field.gravity;
+
+	map_collision(tensor); 
+
+
+	_Tensor[thread]					= tensor;
+}
+#else
+[numthreads(1, 1, 1)]
+void Field(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+#ifdef SIM_BITMAP
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Bitmap(uint thread : SV_DispatchThreadID) 
+{ 
+	StructTensor tensor 			= _Tensor[thread];
+	float4 position 				= tensor.position;
+	position.xyz 					= mul(float4(position.xyz + tensor.velocity.xyz * .5, 1.), transpose(CPU.encoding.transform)).xyz + .5;
+			
+	uint octave 					= 8;
+	uint address 					= position_address_normed(position.xyz, octave); 
+
+
+			
+	uint thread_address 			= address >> 6;
+			
+	uint2 bitmap 					= load_64(thread_address, _Bitmap_Low);
+
+	uint2 collision 				= bitmap & write_64(uint2(0,0), address % 64);
+
+    AllMemoryBarrierWithGroupSync();	
+    
+
+    if(any(collision))    
+    {    
+		float3 position_bitmap		= address_position_normed(address, octave); 
+    	
+    	float3 direction 			= position_bitmap-position.xyz; //float3(0., 1., 0.); 
+    	float range 				= length(direction);
+    	direction 					= normalize(direction);
+
+    	tensor.position.y 			= max(position_bitmap.y, tensor.position.y + range * CPU.sim.bitmap.radius);
+    	tensor.velocity.xyz 		= reflect(tensor.velocity.xyz, -direction) * CPU.sim.bitmap.restitution;
+    }
+
+
+    float bound = CPU.sim.bounds.radius * .95;
+	if(tensor.position.y > bound * .495 && dot(position.xzy, float3(1., 1., 1.)) != 0.)
+	{ 
+		tensor.position.x 			= hash(.12345 + frac(CPU.status.time + tensor.position.x + thread * rcp(65537.)));
+		tensor.position.z 			= hash(.12345 + frac(CPU.status.time + tensor.position.z + thread * rcp(65537.)));
+		tensor.position.xz  		-= .5;
+		tensor.position.xz 			*= bound * .95;
+		tensor.position.y 			= -bound * .95;
+		// tensor.velocity.y 			*= .1;
+
+		StructEdge edge;
+		uint seed 					= TENSOR_COUNT * (tensor.position.x + tensor.position.z);
+		uint address 				= 0;
+		[unroll]
+		for(int i = 0; i < EDGE_COUNT; i++)
+		{
+			seed 					= permute(seed, TENSOR_COUNT);
+			edge.address[i] 		= seed % TENSOR_COUNT;
+		}
+
+		_Edge[thread]				= edge;
+	}
+
+	_Tensor[thread]					= tensor;
+}
+#else
+[numthreads(1, 1, 1)]
+void Bitmap(uint thread : SV_DispatchThreadID) { }
+#endif

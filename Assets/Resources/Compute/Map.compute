@@ -1,0 +1,563 @@
+#pragma target 5.0
+
+#pragma kernel Field
+#pragma kernel Focus
+#pragma kernel Tensor
+#pragma kernel Collision
+#pragma kernel Guassian
+#pragma kernel View
+#pragma kernel Combine
+#pragma kernel Clear
+
+#include "Includes\configuration.cginc"
+#include "Includes\encoding.cginc"
+#include "Includes\map.cginc"
+#include "Includes\equidistribution.cginc"
+#include "Includes\bitwise.cginc"
+#include "Includes\hexeract.cginc"
+#include "Includes\matrices.cginc"		
+
+#define MAP_FIELD
+#define MAP_FOCUS
+#define MAP_TENSOR
+#define MAP_COLLISION
+#define MAP_RADIANCE
+#define MAP_VIEW
+#define MAP_COMBINE
+#define MAP_CLEAR
+
+#ifdef MAP_FIELD
+//Embed Distance Field in Bitmap
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Field(uint thread : SV_DispatchThreadID) //rename to map
+{
+	if(thread < Bitmap_Field_Low_COUNT)
+	{
+		uint2 vertices 			= load_64(thread, _Bitmap_Field_Low);
+
+		uint octave				= 8;
+		float scale       		= spatial_frequency(octave);
+		float threshold 		= scale * .5;
+		float3 position 		= float3(0., 0., 0.);
+		float range 			= 0.;
+		uint vertex 			= 0.;
+		
+		for(uint i = 0; i < 64; i++)
+		{
+			vertex 				= vertex_address_64(thread) | i;
+			position 			= address_position_normed(vertex, octave);			
+			range 				= map(position);
+
+			if(range <= threshold)
+			{	
+				vertices 		= write_64(vertices, i);
+			} 
+		}
+
+		if(any(vertices))
+		{	
+			uint prior;
+			store_64(thread, vertices, _Bitmap_Field_Low);
+		}
+	}
+}
+#else
+[numthreads(1, 1, 1)]
+void Field(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+#ifdef MAP_FOCUS
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Focus(uint thread : SV_DispatchThreadID) //rename to map
+{
+	float scale       					= spatial_frequency(OCTAVE_MAX);
+
+	//to handle encoding multiple freqency voxel bitmaps I've hacked in a counter - each time it runs a pass the frequency will be adjusted along with the origin
+	if(thread == 0)
+	{ 
+		GPU.encoding.transform 			= CPU.encoding.transform;
+		
+		float3 origin 					= address_position_normed(position_address_normed(GPU.field.collision.position.xyz - scale * .5, OCTAVE_MAX), OCTAVE_MAX);
+		origin 							+= scale * .5;
+
+
+		GPU.encoding.transform[0].xyz 	*= scale; // X axis
+		GPU.encoding.transform[1].xyz 	*= scale; // Y axis
+		GPU.encoding.transform[2].xyz 	*= scale; // Z axis
+
+		GPU.encoding.transform[0][3] 	+= origin.x;  // x translation
+		GPU.encoding.transform[1][3] 	+= origin.y;  // y translation
+		GPU.encoding.transform[2][3] 	+= origin.z;
+		
+		uint prior 						= 0;
+		if(GPU.encoding.octave == 24)
+		{
+			InterlockedExchange(GPU.encoding.octave, 8, prior);
+		}
+		else
+		{
+			InterlockedAdd(GPU.encoding.octave, 8, prior);
+		}
+	}
+	  
+
+	uint2 vertices 			= load_64(thread, _Bitmap_Field_High);
+
+	uint octave				= 8;
+	
+	float3 position 		= float3(0., 0., 0.);
+	float range 			= 0.;
+	uint vertex 			= 0.;
+	
+	float threshold 		= .00001;// scale * .5;
+	
+	float4x4 transform 		= GPU.encoding.transform;
+	
+
+	for(uint i = 0; i < 64; i++)
+	{
+		vertex 				= vertex_address_64(thread) | i;
+		position 			= address_position_normed(vertex, 8);
+		position 			= mul(transform, float4(position, 1.)).xyz;
+		
+		range 				= map(position);
+
+		if(range <= threshold)
+		{	
+			vertices = write_64(vertices, i);
+		} 
+	}
+
+	if(any(vertices))
+	{
+		store_64(thread, vertices, _Bitmap_Field_High);
+	}
+}
+#else
+[numthreads(1, 1, 1)]
+void Focus(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+#ifdef MAP_TENSOR
+//Embed Tensor positions into Bitmap
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Tensor(uint thread : SV_DispatchThreadID)
+{	
+	uint octave 		= 8;
+	float4 position 	= _Tensor[thread].position;
+	position.xyz 		= mul(float4(position.xyz, 1.), transpose(CPU.encoding.transform)).xyz + .5;
+
+	uint address 		= position_address_normed(position.xyz, octave);
+
+	uint thread_address = address >> 6;// ;
+
+	uint2 bitmap 		= load_64(thread_address, _Bitmap_Tensor_Low);
+    AllMemoryBarrierWithGroupSync();	
+    
+	bitmap 				|= write_64(bitmap, address % 64);
+	
+	AllMemoryBarrierWithGroupSync();
+	if(thread_address < 262144)
+	{
+		uint prior 		= 0;
+		InterlockedOr(_Bitmap_Tensor_Low[thread_address].x, bitmap.x, prior);
+		InterlockedOr(_Bitmap_Tensor_Low[thread_address].y, bitmap.y, prior);
+	}
+}
+#else
+[numthreads(1, 1, 1)]
+void Tensor(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+#ifdef MAP_COLLISION
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Collision(uint thread : SV_DispatchThreadID) //rename to map
+{
+	if(thread == 0)
+	{
+		uint2 vertices 					= uint2(0x00000000,0x00000000);
+		float scale 					= .001;	
+		 
+		float3 direction 				= CPU.rendering.projection.direction.xyz;
+		float3 origin 					= CPU.field.collision.origin.xyz;
+		float3 position 				= origin;
+		float3 collision 				= float3(0., 0., 0.);
+		
+		uint vertex 					= 0;
+		float threshold 				= 1e-6;
+		float range 					= threshold;
+		float range_min 				= 0xFFFFFFFF;
+		
+		GPU.field.collision.origin 		= CPU.field.collision.origin; 
+		
+		////using mouse pointer rather than center of screen for testing
+		float2 uv 						= CPU.mouse.position * rcp(CPU.rendering.resolution);
+		direction 						= mul(CPU.rendering.projection.inverse, float4(uv * 2. - 1., 0., 1.0f)).xyz;
+	  	direction 		 				= mul(CPU.rendering.projection.to_world, float4(direction, 0.0f)).xyz; 
+	    direction 						= normalize(direction);
+	    ////
+
+		GPU.field.collision.direction 	= float4(direction, 1.); 
+		// GPU.field.collision.direction 	= float4(CPU.rendering.projection.direction, 1.);
+
+		collision 						= float3(0., 0., 0.);	
+
+		// float scale 					= map(position);	
+		// float phi 						= sqrt(5.) * .5 - .5;
+		// float phi2 						= phi * phi;		
+// 		//walk on spheres - no workie - maybe spam sphere directions like ambient occlusion test?
+		// for(uint i = 0; i < 3; i++)
+		// {		
+		// 	range_min 			= 0x0FFFFFFF;   
+			
+		// 	for(uint j = 0; j < 64; j++)
+		// 	{	  
+		// 		range		= map(position + (hex_vertex_to_position(j)) * scale);
+				 
+		// 		if(range < range_min)
+		// 		{			
+		// 			range_min	= range;
+		// 			vertex 		= j;
+		// 		}
+		// 	} 
+		// 	collision 			= hex_vertex_to_position(vertex) * scale;
+		// 	position 			+= collision;
+		// 	scale 				*= phi2;
+		// }
+
+		// // collision 				= CPU.rendering.projection.position.xyz + CPU.rendering.projection.direction.xyz * .00001 + (hex_vertex_to_position(CPU.status.frame % 64) - phi2) * scale;
+		// collision 				= origin + collision;
+
+
+		float depth 			= 0.;
+		for(uint i = 0; i < 2048; i++)
+		{	
+			if(range >= threshold && range < 24.)
+			{
+				range 			= map(origin + direction * depth);
+				depth 			+= range * .125;	
+			}
+			else
+			{
+				range_min 		= abs(range);
+				collision 		= origin + direction * depth;
+				break;
+			} 
+		}
+
+		GPU.field.collision.position 		= clamp(float4(collision, range_min), -32., 32.);
+		GPU.field.collision.direction		= clamp(float4(normalize(collision-origin), length(collision-origin)), -32., 32.);
+	}	
+}
+#else
+[numthreads(1, 1, 1)]
+void Collision(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+
+// #ifdef MAP_RADIANCE
+
+float4 LoadAndDecodePosition(uint index)
+{
+	uint addrU = index * 12;
+    uint addrA = addrU & ~0x3;
+
+    uint val0 = _Guassian_Position.Load(addrA);
+    uint val1 = _Guassian_Position.Load(addrA + 4);
+    uint val2 = _Guassian_Position.Load(addrA + 8);
+    if (addrU != addrA)
+    {
+        uint val3 = _Guassian_Position.Load(addrA + 12);
+        val0 = (val0 >> 16) | ((val1 & 0xFFFF) << 16);
+        val1 = (val1 >> 16) | ((val2 & 0xFFFF) << 16);
+        val2 = (val2 >> 16) | ((val3 & 0xFFFF) << 16);
+    }
+
+	return float4(asfloat(val0), asfloat(val1), asfloat(val2), 1.); 
+}
+
+
+float4 DecodePacked_10_10_10_2(uint enc)
+{
+    return float4(
+        (enc & 1023) / 1023.0,
+        ((enc >> 10) & 1023) / 1023.0,
+        ((enc >> 20) & 1023) / 1023.0,
+        ((enc >> 30) & 3) / 3.0);
+}
+
+
+uint LoadRotationUInt(uint addrU)
+{
+    uint addrA = (addrU * 16) & ~0x3;
+    uint val = _Guassian_Rotation.Load(addrA);
+    
+    if (addrU != addrA)
+    {
+        uint val1 = _Guassian_Rotation.Load(addrA + 4);
+        val = (val >> 16) | ((val1 & 0xFFFF) << 16);
+    }
+    return val;
+}
+
+float4 DecodeRotation(float4 pq)
+{
+    uint idx = (uint)round(pq.w * 3.0); // note: need to round or index might come out wrong in some formats (e.g. fp16.fp16.fp16.fp16)
+    float4 q;
+    q.xyz = pq.xyz * sqrt(2.0) - (1.0 / sqrt(2.0));
+    q.w = sqrt(1.0 - saturate(dot(q.xyz, q.xyz)));
+    if (idx == 0) q = q.wxyz;
+    if (idx == 1) q = q.xwyz;
+    if (idx == 2) q = q.xywz;
+    return q;
+}
+
+float4 LoadAndDecodeScale(uint index)
+{
+	uint addrU = index * 16;
+    uint addrA = addrU & ~0x3;
+
+    uint val0 = _Guassian_Position.Load(addrA);
+    uint val1 = _Guassian_Position.Load(addrA + 4);
+    uint val2 = _Guassian_Position.Load(addrA + 8);
+    if (addrU != addrA)
+    {
+        uint val3 = _Guassian_Position.Load(addrA + 12);
+        val0 = (val0 >> 16) | ((val1 & 0xFFFF) << 16);
+        val1 = (val1 >> 16) | ((val2 & 0xFFFF) << 16);
+        val2 = (val2 >> 16) | ((val3 & 0xFFFF) << 16);
+    }
+
+	return float4(asfloat(val0), asfloat(val1), asfloat(val2), 1.); 
+}
+
+
+//Embed Guassian Points in Bitmap
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Guassian(uint thread : SV_DispatchThreadID) //rename to map
+{	
+  	float4 position  		= LoadAndDecodePosition(thread);	
+	float4 rotation			= DecodeRotation(DecodePacked_10_10_10_2(LoadRotationUInt(thread)));
+    float4 scale			= LoadAndDecodeScale(thread);
+
+	position  				= mul(position, transpose(CPU.guassian.transform));
+
+  	bool bounded 			=	position.x > -.5
+  							&&	position.y > -.5
+  							&&	position.z > -.5
+  							&&	position.x <  .5
+  							&&	position.y <  .5
+  							&&	position.z <  .5;
+
+	if(bounded)
+	{
+		uint octave 		= OCTAVE_MAX;// + CPU.debug.j;  
+		uint address 		= position_address_normed(position.xyz + .5, octave);		
+							 
+		uint thread_address = address >> 6;
+		uint2 bitmap 		= load_64(thread_address, _Bitmap_Guassian_High);
+	    bitmap 				|= write_64(bitmap, address % 64);		
+
+		if(thread_address < 262144)
+		{
+			uint prior 		= 0;
+			InterlockedOr(_Bitmap_Guassian_High[thread_address].x, bitmap.x, prior);
+			InterlockedOr(_Bitmap_Guassian_High[thread_address].y, bitmap.y, prior);
+			InterlockedOr(_Bitmap_Guassian_Low[thread_address].x, bitmap.x, prior);
+			InterlockedOr(_Bitmap_Guassian_Low[thread_address].y, bitmap.y, prior);
+		}
+	}	
+}
+// #else
+// [numthreads(1, 1, 1)]
+// void Radiance(uint thread : SV_DispatchThreadID) { }
+// #endif
+
+
+
+// [numthreads(THREAD_GROUP_SIZE, 1, 1)]
+// void Select(uint thread : SV_DispatchThreadID) //rename to map
+// {
+// 	if(thread == 0)
+// 	{
+// 		uint2 vertices 					= uint2(0x00000000,0x00000000);
+// 		float scale 					= .001;	
+		 
+// 		float3 direction 				= CPU.rendering.projection.direction.xyz;
+// 		float3 origin 					= CPU.field.collision.origin.xyz;// + direction * .015;
+// 		float3 position 				= origin;
+// 		float3 collision 				= float3(0., 0., 0.);
+// 		float phi 						= sqrt(5.) * .5 - .5;
+// 		float phi2 						= phi * phi;
+// 		uint vertex 					= 0;
+// 		float threshold 				= 1e-6;
+// 		float range 					= threshold;
+// 		float range_min 				= 0xFFFFFFFF;
+		
+// 		GPU.field.collision.origin 		= CPU.field.collision.origin; 
+// 		GPU.field.selection.direction 	= float4(CPU.rendering.projection.direction, 1.);
+
+// 		collision 						= float3(0., 0., 0.);	
+
+// 		float depth 			= 0.;
+// 		for(uint i = 0; i < 2048; i++)
+// 		{	
+// 			if(range >= threshold && range < 24.)
+// 			{
+// 				range 			= map(origin + direction * depth);
+// 				depth 			+= range * .125;	
+// 			}
+// 			else
+// 			{
+// 				range_min 		= abs(range);
+// 				collision 		= origin + direction * depth;
+// 				break;
+// 			} 
+// 		}
+
+// 		GPU.field.collision.position 		= clamp(float4(collision, range_min), -32., 32.);
+// 		GPU.field.collision.direction		= clamp(float4(normalize(collision-origin), length(collision-origin)), -32., 32.);
+// 	}	
+// }
+
+
+
+#ifdef MAP_VIEW
+float3 uv_to_ray(float2 uv) 
+{
+   	float3 direction = mul(CPU.rendering.projection.inverse, float4(uv * 2. - 1., 0., 1.0f)).xyz;
+  	direction 		 = mul(CPU.rendering.projection.to_world, float4(direction, 0.0f)).xyz;  	
+    return normalize(direction);
+}
+
+
+[numthreads(8, 8, 1)]
+void View(uint2 thread : SV_DispatchThreadID)
+{
+	float4 position 			= _GeometryTarget[thread];
+	
+	uint2 resolution			= CPU.rendering.resolution; 
+	uint e 						= 2.;//CPU.debug.h; //distance of samples
+	float4 position0 			= _GeometryTarget[clamp(thread - uint2(e,0), uint2(0,0), resolution)];
+	float4 position1 			= _GeometryTarget[clamp(thread - uint2(0,e), uint2(0,0), resolution)];
+	float4 position2 			= _GeometryTarget[clamp(thread + uint2(e,0), uint2(0,0), resolution)];
+	float4 position3 			= _GeometryTarget[clamp(thread + uint2(0,e), uint2(0,0), resolution)];
+	
+	
+	float3 error 				= abs(position.xyz-position0.xyz)
+								+ abs(position.xyz-position1.xyz)
+								+ abs(position.xyz-position2.xyz)
+								+ abs(position.xyz-position3.xyz);
+	
+	float tolerance 			= 0.025; CPU.debug.i; //
+	bool similar 				= length(error) < tolerance;
+
+	similar 					= dot(position, float3(1., 1., 1.)) != 0.;
+	if(similar)
+	{
+		position 				= position
+								+ position0
+								+ position1
+								+ position2
+								+ position3;
+		position 				*= .2;		
+
+		float2 uv	 			= thread.xy * rcp(resolution);				
+	   	float3 ray 	 			= uv_to_ray(uv);
+	   	// float3 origin 			= mul(CPU.rendering.projection.to_world, float4(0.,0.,0.,1.)).xyz;
+
+	   	float3 origin 			= mul(CPU.rendering.projection.to_world, CPU.rendering.projection.position).xyz;
+		float3 direction 		= normalize(position.xyz - origin);
+
+		bool aligned			= pow(dot(direction, ray), 16.) < .85; //.85 is suss - CPU.debug.j;
+		
+		if(aligned)
+		{
+			uint octave 		= OCTAVE_MAX;
+			uint address 		= position_address_normed(position.xyz, octave);
+
+			uint thread_address = address >> 6;
+			uint2 bitmap		= load_64(thread_address, _Bitmap_Guassian_Low);
+			bitmap 				|= write_64(bitmap, address % 64);			
+
+			uint2 bitmap_high  	= load_64(thread_address, _Bitmap_Guassian_High);			
+
+			if(any(bitmap || bitmap_high))
+			{
+				if(thread_address < 262144)
+				{
+					uint prior 		= 0;
+					InterlockedOr(_Bitmap_Guassian_Low[thread_address].x, bitmap.x, prior);
+					InterlockedOr(_Bitmap_Guassian_Low[thread_address].y, bitmap.y, prior);
+				}	
+			}
+		}
+	}
+}
+#else
+[numthreads(1, 1, 1)]
+void View(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+#ifdef MAP_CLEAR
+//Clears all data in the buffer
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Clear(uint thread : SV_DispatchThreadID)
+{		
+	if(thread < Bitmap_Field_Low_COUNT)
+	{
+		store_64(thread, uint2(0x0000000, 0x0000000), _Bitmap_Low);
+		store_64(thread, uint2(0x0000000, 0x0000000), _Bitmap_High);
+	}
+
+	if(thread < Bitmap_Field_Low_COUNT)
+	{
+		store_64(thread, uint2(0x0000000, 0x0000000), _Bitmap_Field_Low);
+		store_64(thread, uint2(0x0000000, 0x0000000), _Bitmap_Field_High);
+		store_64(thread, uint2(0x0000000, 0x0000000), _Bitmap_Tensor_Low);
+		store_64(thread, uint2(0x0000000, 0x0000000), _Bitmap_Tensor_High);
+		store_64(thread, uint2(0x0000000, 0x0000000), _Bitmap_Guassian_Low);
+		store_64(thread, uint2(0x0000000, 0x0000000), _Bitmap_Guassian_High);
+	}	
+}
+#else
+[numthreads(1, 1, 1)]
+void Clear(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+
+#ifdef MAP_COMBINE
+//Combines all bitmaps to the main buffer
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Combine(uint thread : SV_DispatchThreadID)
+{		
+	//read bitmaps
+	uint2 bitmap_low 	= _Bitmap_Field_Low[thread] | _Bitmap_Guassian_Low[thread] | _Bitmap_Tensor_Low[thread];
+
+	uint2 bitmap_high 	= _Bitmap_Field_High[thread];
+
+	uint prior;
+
+	// InterlockedExchange(_Bitmap_Low[thread].x, bitmap_low.x, prior);
+	// InterlockedExchange(_Bitmap_Low[thread].y, bitmap_low.y, prior);
+
+	// InterlockedExchange(_Bitmap_High[thread].x, bitmap_high.x, prior);
+	// InterlockedExchange(_Bitmap_High[thread].y, bitmap_high.y, prior);
+
+	InterlockedOr(_Bitmap_Low[thread].x, bitmap_low.x, prior);
+	InterlockedOr(_Bitmap_Low[thread].y, bitmap_low.y, prior);
+
+	InterlockedOr(_Bitmap_High[thread].x, bitmap_high.x, prior);
+	InterlockedOr(_Bitmap_High[thread].y, bitmap_high.y, prior);
+}
+#else
+[numthreads(1, 1, 1)]
+void Combine(uint thread : SV_DispatchThreadID) { }
+#endif
+

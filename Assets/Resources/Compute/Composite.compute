@@ -1,0 +1,42 @@
+#pragma target 5.0
+
+#pragma kernel Geometry
+#pragma kernel Prior
+
+#include "Includes\configuration.cginc"
+#include "Includes\equidistribution.cginc"
+#include "Includes\rasterization.cginc"
+#include "Includes\matrices.cginc"
+
+
+[numthreads(THREAD_GROUP_SIZE_X, THREAD_GROUP_SIZE_Y, 1)]
+void Geometry(uint2 thread : SV_DispatchThreadID)
+{
+	uint2 resolution		= CPU.rendering.resolution; 	
+
+	if(thread.x < resolution.x && thread.y < resolution.y)
+	{
+		float4 position 		= _GeometryTarget[thread];
+		float3 origin 			= mul(CPU.rendering.projection.to_world, float4(0.,0.,0.,1.)).xyz;
+		float depth 			= length(position.xyz - origin + .5);
+
+		float4 color 			= _ColorTarget[thread];		
+		color.w 				= color.w != 0. && depth != 0. ? min(color.w, depth) : depth;
+
+		_ColorTarget[thread]	= color;
+	}
+}
+
+
+[numthreads(THREAD_GROUP_SIZE_X, THREAD_GROUP_SIZE_Y, 1)]
+void Prior(uint2 thread : SV_DispatchThreadID)
+{
+	uint2 resolution		= CPU.rendering.resolution; 	
+
+	if(thread.x < resolution.x && thread.y < resolution.y)
+	{
+		_PriorTarget[thread]	= lerp(_ColorTarget[thread], _PriorTarget[thread], CPU.rendering.composition.prior);
+
+		_ColorTarget[thread]	= _PriorTarget[thread];
+	}
+}

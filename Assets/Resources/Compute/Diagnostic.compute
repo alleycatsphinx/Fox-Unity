@@ -1,0 +1,979 @@
+#pragma target 5.0
+
+#pragma kernel Vertex
+#pragma kernel Volume
+#pragma kernel Focus
+#pragma kernel Derivative
+#pragma kernel Curve
+#pragma kernel Tensor
+#pragma kernel Address
+#pragma kernel Mesh
+#pragma kernel Collision
+#pragma kernel Input
+#pragma kernel Bitmap
+#pragma kernel Memory
+#pragma kernel Target
+#pragma kernel UV
+
+#include "Includes\configuration.cginc"
+#include "Includes\encoding.cginc"
+#include "Includes\map.cginc"
+#include "Includes\equidistribution.cginc"
+#include "Includes\colorgradients.cginc"
+#include "Includes\rasterization.cginc"
+#include "Includes\matrices.cginc"
+#include "Includes\spherical_fibonacci.cginc"
+#include "Includes\sobel.cginc"
+
+// [numthreads(1, 1, 1)]
+// void Vertex(uint thread : SV_DispatchThreadID) { }
+// [numthreads(1, 1, 1)]
+// void Volume(uint thread : SV_DispatchThreadID) { }
+// [numthreads(1, 1, 1)]
+// void Focus(uint thread : SV_DispatchThreadID) { }
+// [numthreads(1, 1, 1)]
+// void Derivative(uint thread : SV_DispatchThreadID) { }
+// [numthreads(1, 1, 1)]
+// void Curve(uint thread : SV_DispatchThreadID) { }
+// [numthreads(1, 1, 1)]
+// void Tensor(uint thread : SV_DispatchThreadID) { }
+[numthreads(1, 1, 1)]
+void Address(uint thread : SV_DispatchThreadID) { }
+// [numthreads(1, 1, 1)]
+// void Mesh(uint thread : SV_DispatchThreadID) { }
+// [numthreads(1, 1, 1)]
+// void Collision(uint thread : SV_DispatchThreadID) { }
+// [numthreads(1, 1, 1)]
+// void Input(uint thread : SV_DispatchThreadID) { }
+// [numthreads(1, 1, 1)]
+// void Bitmap(uint thread : SV_DispatchThreadID) { }
+// [numthreads(1, 1, 1)]
+// void Memory(uint thread : SV_DispatchThreadID) { }
+// [numthreads(1, 1, 1)]
+// void Target(uint thread : SV_DispatchThreadID) { }
+// [numthreads(1, 1, 1)]
+// void UV(uint thread : SV_DispatchThreadID) { }
+
+
+#define DIAGNOSTIC_VERTEX
+#define DIAGNOSTIC_VOLUME
+#define DIAGNOSTIC_DERIVATIVE
+#define DIAGNOSTIC_CURVE
+#define DIAGNOSTIC_TENSOR
+// #define DIAGNOSTIC_ADDRESS
+#define DIAGNOSTIC_MESH
+#define DIAGNOSTIC_FOCUS
+#define DIAGNOSTIC_COLLISION
+#define DIAGNOSTIC_INPUT
+#define DIAGNOSTIC_BITMAP
+#define DIAGNOSTIC_MEMORY
+#define DIAGNOSTIC_TARGET
+#define DIAGNOSTIC_UV
+
+float3 octave_color(float octave)
+{
+	float3 color = float3(.1,.1,.1);//rainbow(1.-(((1.+octave) * .37) * .44 - .63));
+	// return color;
+	return octave == 0 ? color //todo - set colors manually 
+		 : octave == 1 ? rainbow(.81) * 2.
+		 : octave == 2 ? rainbow( .75)
+		 : octave == 3 ? rainbow( .70)
+		 : octave == 4 ? rainbow( .65)
+		 : octave == 5 ? rainbow(.55)
+		 : octave == 6 ? rainbow(.4)
+		 : octave == 7 ? rainbow(.32) * 2.
+		 : 				 rainbow(.19) * 4.;
+ 
+    //desk - drop door - right side - cubbies - left of right side - red leather - hawaii - xanex, rnd basket rt side under wallet 
+	//black mask
+}
+
+
+//witch of agnesi 
+float witch(in float x, in float y)
+{
+	return y * y * y * 8. * rcp(x * x + 4. * y * y);
+}
+
+
+//derivative of arctan function
+float witch_normalized(in float x)
+{
+	return rcp(x * x + 1.);
+}
+
+float linear_depth(in float near_plane, in float far_plane, in float depth) 			
+{
+	return (near_plane * far_plane) / (far_plane - depth * (far_plane - near_plane));	
+} 
+
+
+//note - must match the one used in the prefix sum kernel
+float3 tensor_embedding_rotation(float3 position)
+{
+    float3x3 rotation           = rmat(normalize(equidistribute_cube(CPU.status.frame + CPU.status.time)) * atan(1.) * 8.);
+    return mul(position, rotation);
+}
+
+#ifdef DIAGNOSTIC_VERTEX
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Vertex(uint thread : SV_DispatchThreadID)
+{			
+	uint thread_hash							= equidistribute_thread(thread); //better integration
+	
+	//load 64 vertices (each set bit counts as a vertex in the space filling curve)
+	uint2 vertices								= load_64(thread_hash, _Bitmap_Low);	
+	
+	//test to see if any vertices exist here - if not, end the thread
+	if(any(vertices))																															
+	{
+		//"CPU" and "GPU" are defined in configuration.cginc and match the c# configuration 1:1
+		uint octave								= 8;//OCTAVE_MAX;
+
+		float3 position							= float3(0.,0.,0.);
+				
+		float4 color							= float4(.125, .125, .125, .125);
+		
+		int2 coordinate 						= int2(0,0);
+		uint address 							= 0;
+		bool occupied 							= false;
+
+		//space filling curve index for the first vertex - (64 vertices are loaded, so thread * 64) - addressing.cginc
+		uint vertex_address						= vertex_address_64(thread_hash);
+		
+		float offset       						= spatial_frequency(8) * .5;
+		
+		//loop through all 64 vertices
+		for(uint i = 0; i < 64; i++)												
+		{				
+			occupied							= read_64(vertices, i);				
+			
+			if(occupied)
+			{							
+				//add the current index to the starting address to create this specific space filling curve position
+				address							= vertex_address | i;				
+
+				//transform the address into a spatial position - encoding.cginc	
+				position						= address_position_normed(address, octave) + offset;
+
+				//for testing
+				// occupied 						= map(position) < .000001;
+				if(in_frustrum(position))																								
+				{
+					float depth 				= distance_to_view(position);
+					//brighten if close to camera
+					color 						= .0625 * clamp(rcp(pow(depth, 2.)), 1., 256.);
+					
+					//project to screen - rendering.cginc
+					coordinate					= view_projection_coordinate(position); 
+					
+					//add color to the pixel in the color target - it will be blitted directly to the screen when all kernels have run
+					//note, this could be done better if I were using the existing rendertarget (but I forget how to access that...)
+					// _ColorTarget[coordinate]	+= color;	
+
+					float scale 			= .125 * rcp(depth);
+					float limit 			=  512;
+
+					raster_circle(position, scale, limit, color, _ColorTarget);
+				}		
+			}
+		}
+	}							
+}
+#else
+[numthreads(1, 1, 1)]
+void Vertex(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+#ifdef DIAGNOSTIC_VOLUME
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Volume(uint thread : SV_DispatchThreadID)
+{				
+	// uint thread_hash 					= thread < 262144 ? equidistribute_n(thread, Bitmap_Low_COUNT) : thread;
+	uint thread_hash 					= thread;
+	uint2 vertices						= load_64(thread_hash, _Bitmap_Low);
+
+	uint vertex_address 				= vertex_address_64(thread_hash);       
+	uint octave 						= address_octave(vertex_address);
+
+	float4 color						= float4(1., 1., 1., 1.);
+	float4 color_out 					= color;
+	float scale 						= 1.;
+
+	uint prefix							= 0;		
+	uint address 						= 0;
+	float3 position						= float3(0.,0.,0.);	
+	float depth 						= 0.;
+	uint limit 							= 0;
+	    
+	
+	bool render 						= any(vertices);
+	uint v 								= 0;
+	render 								= octave == uint(CPU.rendering.diagnostic.debug.w) || CPU.rendering.diagnostic.debug.w <= 0.; //draw per octave
+	if(render)
+	{	
+		for(uint i = 0; i < 64; i++)
+		{		
+			v 							= i;//equidistribute_n(i, 64);
+			address 					= vertex_address | v;
+			 
+			if(address < 19173960)
+			{			
+				if(read_64(vertices, v))
+				{		
+					octave				= address_octave(address); 
+					prefix				= address_prefix(address);		
+
+					address 			-= prefix; 
+					
+					scale       		= spatial_frequency(octave);
+
+					position			= address_position_normed(address, octave);																
+									 
+					depth				= distance_to_view(position);	
+					  
+					//test using analytic measure rather than reading from map																					
+					// float3 position_centered = address_position_normed_centered(address, octave);
+					// if(map(position_centered) < (spatial_frequency(octave) * sqrt(3.) * .5))	//test using analytic measure rather than reading from map																					
+					{								
+						color_out.xyz 	= octave_color(octave) * .25;				
+						color_out 		= clamp(color_out * .25, 0., 1.);
+						
+						limit 			= 512.;
+						
+						raster_cube(position, scale, limit, color_out, _ColorTarget);
+
+						//text
+						// if(depth < .5 && in_frustrum(position))
+						// {
+						// 	position 						= mul(CPU.encoding.transform, float4(position, 1.)).xyz;
+						// 	int2 coordinate					= view_projection_coordinate(position.xyz); 
+						// 	float depth_prior				= _ColorTarget[coordinate].w;
+
+						// 	if(depth < depth_prior)
+						// 	{
+						// 		float scale					= .0625 * rcp(depth) * spatial_frequency(octave+1) * CPU.rendering.diagnostic.debug.x;	 		
+
+						// 		float fade 					= abs(.5-depth);
+
+						// 		raster_uint(address, scale, color_out * fade, false, coordinate, _ColorTarget);  	//position to curve index
+						// 	}
+						// }
+					}
+				}							
+			}				
+		}		
+	}
+}
+#else
+[numthreads(1, 1, 1)]
+void Volume(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+
+#ifdef DIAGNOSTIC_FOCUS
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Focus(uint thread : SV_DispatchThreadID)
+{					
+	uint2 vertices						= load_64(thread, _Bitmap_High);
+	uint vertex_address 				= vertex_address_64(thread);           
+	uint octave 						= address_octave(vertex_address);
+
+	float4 color						= float4(1., 1., 1., 1.);
+	float4 color_out 					= color;
+	float scale 						= 1.;
+	float scale_next 					= 1.;
+	uint prefix							= 0;		
+	uint address 						= 0;
+	float3 position						= float3(0.,0.,0.);	
+	float depth 						= 0.;
+	uint limit 							= 0;
+	
+	float4x4 transform 					= GPU.encoding.transform;
+	float3 origin 						= address_position_normed(position_address_normed(GPU.field.collision.position.xyz, OCTAVE_MAX), OCTAVE_MAX) + .5;
+	
+	if(any(vertices))
+	{	
+		for(uint i = 0; i < 64; i++)
+		{			
+			address 					= vertex_address | i;
+			
+			if(address < ADDRESS_MAX)
+			{			
+				if(read_64(vertices, i))
+				{						
+					octave				= address_octave(address); 
+					prefix				= address_prefix(address);								
+					address 			-= prefix;				
+
+					scale       		= spatial_frequency(octave);
+					position			= address_position_normed(address, octave);																
+									
+					depth				= distance_to_view(position);	
+			
+					color_out.xyz 		= octave_color(octave);				
+					color_out 			= clamp(color_out * .25, 0., 1.);
+					
+					limit 				= 512.;
+					
+					raster_cube(position, scale, limit, color_out, transform, _ColorTarget);
+				}							
+			}				
+		}		
+	}
+}
+#else
+[numthreads(1, 1, 1)]
+void Focus(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+
+#ifdef DIAGNOSTIC_DERIVATIVE
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Derivative(uint thread : SV_DispatchThreadID)
+{					
+	uint vertex_address					= vertex_address_64(equidistribute_n(thread, 262144));     
+
+	uint octave 						= 8;
+	
+	float4 color						= float4(1., 1., 1., 1.);
+	float4 color_out 					= color;
+	float scale 						= 1.;
+	float scale_next 					= 1.;
+	uint prefix							= 0;		
+	uint address 						= 0;
+	float3 position						= float3(0.,0.,0.);	
+	float depth 						= 0.;
+	uint limit 							= 0;
+	
+
+	for(uint i = 0; i < 64; i++)
+	{			
+		address 						= equidistribute_n(vertex_address | i, 16777214);
+
+		octave					 		= address_octave(address); 
+		prefix							= address_prefix(address);								
+		address 						-= prefix;				
+		
+		scale       					= spatial_frequency(octave);
+		position						= address_position_normed(address, octave);																
+		depth							= distance_to_view(position);						
+		
+		float3 position_centered 		= address_position_normed_centered(address, octave);
+
+		limit 							= 512.; 
+		
+		// line showing map derivative	
+		float3 normal 					= derivative(position_centered, scale * .5);
+		float range 					= map(position_centered);
+		float phase 					= sin(CPU.status.time * -4. + range * 256.) * .5 + .5;
+		float angle 					= atan2(cos(phase), -sin(phase));		
+		
+		float2x2 rotation_xy			= rmat(angle);
+		float3 tangent					= normal;
+		tangent.xy 						= mul(normal.xy, rotation_xy);
+		
+
+		float opacity 					= range < scale ? 1. : .125;
+		
+		float pulse_animation 			= phase;	
+		float4 color_out 				= float4(normalize(normal).xyz, 1.) * opacity * .125 
+										+ pulse_animation * .025;
+		
+		// raster_line(position_centered, position_centered - tangent, 512, color_out, _ColorTarget);				
+		raster_line(position_centered, position_centered - normal, 512, color_out * .5, _ColorTarget);				
+	}				
+}
+#else
+[numthreads(1, 1, 1)]
+void Derivative(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+
+#ifdef DIAGNOSTIC_TENSOR 
+static void draw_line(int2 a, int2 b, float4 col)
+{
+    int2 dim; 
+
+    _ColorTarget.GetDimensions(dim.x, dim.y);
+
+    int dx      = abs(b.x - a.x), sx = a.x < b.x ? 1 : -1;
+    int dy      = -abs(b.y - a.y), sy = a.y < b.y ? 1 : -1;
+    int err     = dx + dy, e2;
+    int2 p      = a;
+
+    for (;;)
+    {
+        if ((uint)p.x < (uint)dim.x && (uint)p.y < (uint)dim.y)
+        {
+            _ColorTarget[p] = col;
+        }
+
+        if (p.x == b.x && p.y == b.y) break;
+        
+        e2 = 2 * err;
+        if (e2 >= dy) 
+        {   
+            err += dy; 
+            p.x += sx; 
+        }
+        
+        if (e2 <= dx) 
+        { 
+            err += dx; 
+            p.y += sy; 
+        }
+    }
+}
+
+static float edge2(int2 a, int2 b, int2 p)
+{
+    return (float)(p.x - a.x) * (float)(b.y - a.y) - (float)(p.y - a.y) * (float)(b.x - a.x);
+}
+
+static void fill_quad(int2 p0, int2 p1, int2 p2, int2 p3, float4 col)
+{
+#if FILL_QUAD
+    int2 dim; _ColorTarget.GetDimensions(dim.x, dim.y);
+    int minx = min(min(p0.x, p1.x), min(p2.x, p3.x));
+    int miny = min(min(p0.y, p1.y), min(p2.y, p3.y));
+    int maxx = max(max(p0.x, p1.x), max(p2.x, p3.x));
+    int maxy = max(max(p0.y, p1.y), max(p2.y, p3.y));
+
+    minx = max(minx, 0); miny = max(miny, 0);
+    maxx = min(maxx, dim.x - 1); maxy = min(maxy, dim.y - 1);
+    if (minx > maxx || miny > maxy) return;
+
+    // two triangles: (p0,p1,p2) and (p0,p2,p3)
+    for (int y = miny; y <= maxy; ++y)
+    for (int x = minx; x <= maxx; ++x)
+    {
+        int2 P = int2(x, y);
+        float e0 = edge2(p0, p1, P);
+        float e1 = edge2(p1, p2, P);
+        float e2v = edge2(p2, p0, P);
+        bool in012 = (e0>=0 && e1>=0 && e2v>=0) || (e0<=0 && e1<=0 && e2v<=0);
+        if (in012) { _ColorTarget[P] = col; continue; }
+
+        float f0 = edge2(p0, p2, P);
+        float f1 = edge2(p2, p3, P);
+        float f2 = edge2(p3, p0, P);
+        bool in023 = (f0>=0 && f1>=0 && f2>=0) || (f0<=0 && f1<=0 && f2<=0);
+        if (in023) { _ColorTarget[P] = col; }
+    }
+#endif
+}
+
+
+#ifdef DIAGNOSTIC_CURVE
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Curve(uint thread : SV_DispatchThreadID)
+{			
+	uint thread_hash 			= thread;// equidistribute_thread(thread);
+
+	uint thread_map				= _Tensor_Map[thread];	
+	StructTensor tensor 		= _Tensor[thread_map];
+
+	uint thread_map_next		= _Tensor_Map[(thread + 1) % 262144];	
+	StructTensor tensor_next	= _Tensor[thread_map_next];
+	
+	float depth					= distance_to_view(tensor.position.xyz);
+	float scale 				= .0125 * rcp(depth);
+	float limit 				=  512;
+
+	float4 color 				= float4(0., 0., 0., 1.);
+
+	float fade 					= max(.5-depth, 0.);
+	
+
+	//FULL SPACE FILLING CURVE TRAVERSAL
+	if(thread < 262144)
+	{
+		uint vertex_address				= vertex_address_64(equidistribute_thread(thread_hash));
+		float3x3 rotation          		= rmat(GPU.encoding.rotation);
+    		
+		float3 position_curve 			= mul(address_position_normed(vertex_address     , 8), rotation);
+		float3 position_curve_next 		= mul(address_position_normed(vertex_address + 64, 8), rotation);
+
+		if(in_frustrum(position_curve) && in_frustrum(position_curve_next))
+		{
+			float range 				= min(length(CPU.rendering.projection.position-position_curve), length(CPU.rendering.projection.position-position_curve_next));
+			float shade 				= clamp(1. - range * .5, .0125, 1.) * .0125;
+			raster_line(position_curve, position_curve_next, limit, float4(1.,1.,1.,1.) * shade, _ColorTarget);	
+		}
+	}
+
+	
+	//SPACE FILLING CURVE EMBEDDING LINE
+	float span 						= length(tensor.position.xyz-tensor_next.position.xyz);
+    if(in_frustrum(tensor.position.xyz) && in_frustrum(tensor_next.position.xyz) && span < .0625)
+	{
+		float range 				= min(length(CPU.rendering.projection.position-tensor.position.xyz), length(CPU.rendering.projection.position-tensor_next.position.xyz));
+		float shade 				= clamp(1. - range * .5, .0125, 1.) * .05;
+		
+		//line from tensor to next via pointer (they should be spatially local if prefix summarized)
+		color.xyz 		= lerp(float3(0., 1., 0.), float3(1., 0., 0.), clamp(range * 5., 0., 1.)) * shade;
+		raster_line(tensor.position.xyz, tensor_next.position.xyz, limit, color, _ColorTarget);			
+	}	
+	//
+
+
+	//DEBUG POINTER VALUES
+	if(in_frustrum(tensor.position.xyz) && depth < .125)
+	{
+		uint address                = position_address_normed(tensor.position.xyz, 8) >> 6;
+
+		int2 coordinate				= view_projection_coordinate(tensor.position.xyz + float3(0., .00025, 0.)); 
+		coordinate.x				-= scale * 30;
+		coordinate.y				+= scale * 32;
+
+		float depth_prior 			= _ColorTarget[coordinate].w;
+
+		if(depth < depth_prior * 1.125)
+		{ 
+			scale 					= .0125 * rcp(depth);	 		
+			fade 					= max(.125 - depth, 0.) * 8.;
+
+			raster_uint(thread_map, scale, float4(1., 1., 1., 0.) * .75 * fade, false, coordinate, _ColorTarget);	 		//thread		 	
+			coordinate.x			+= scale * 16;
+		 	coordinate.y			-= scale * 8;
+
+		 	raster_uint(thread, scale, float4(1., 1., 1., 0.) * .75 * fade, false, coordinate, _ColorTarget); 		//thread map pointer		
+
+		 	coordinate.y			-= scale * 8;
+
+			float4 curve_color 		= float4(rainbow(float(thread_map + tensor.count) * rcp(262144.)), 1.) * 1.25 + .125 ;
+			curve_color 			*= fade;
+
+			raster_uint(address + tensor.count, scale, curve_color, false, coordinate, _ColorTarget);  							//position to curve index
+
+			coordinate.y			-= scale * 8;
+
+			raster_uint(tensor.count, scale, float4(1., 1., 1., 1.) * .75 * fade, false, coordinate, _ColorTarget);  	//position to curve index
+		}
+	}
+	//
+}
+#else
+[numthreads(1, 1, 1)]
+void Curve(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Tensor(uint thread : SV_DispatchThreadID)
+{			
+	uint address 				= equidistribute_thread(thread);
+	StructTensor tensor 		= _Tensor[address];
+	StructEdge edge 			= _Edge[address];
+
+	float depth					= distance_to_view(tensor.position.xyz);						
+	float scale 				= .25 * rcp(depth);
+	float limit 				=  1024;
+
+	float3 position_local		= tensor.position.xyz;
+	float3 position_neighbor	= float3(0., 0., 0.);
+
+	bool visible 				= in_frustrum(position_local);
+	bool bounded				= length(tensor.prior.xyz-tensor.position.xyz) < CPU.debug.n || CPU.debug.n < 0.;
+	////CIRCLE AT POSITION & PRIOR TO NEXT TRAIL
+	if(visible && bounded)
+	{		
+		// raster_circle(tensor.position.xyz, scale, limit, tensor.color * 2., _ColorTarget);	
+		// raster_line(tensor.position.xyz, tensor.position.xyz + tensor.velocity.xyz, limit, tensor.color, _ColorTarget);							
+		raster_line(tensor.prior.xyz, tensor.position.xyz, limit, tensor.color, _ColorTarget);							
+		// raster_line(tensor.prior1.xyz,   tensor.prior.xyz, limit, tensor.color * .65, _ColorTarget);							
+		// raster_line(tensor.prior2.xyz,  tensor.prior1.xyz, limit, tensor.color * .35, _ColorTarget);							
+	}	
+	////
+}
+#else
+[numthreads(1, 1, 1)]
+void Tensor(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+// #define DIAGNOSTIC_ADDRESS
+// [numthreads(THREAD_GROUP_SIZE, 1, 1)]
+// void Address(uint thread : SV_DispatchThreadID)
+// {			
+// 	uint address 				= equidistribute_thread(thread);
+// 	StructTensor tensor 		= _Tensor[address];
+// 	StructEdge edge 			= _Edge[address];
+
+// 	float depth					= distance_to_view(tensor.position.xyz);						
+// 	float scale 				= .25 * rcp(depth);
+// 	float limit 				=  1024;
+
+// 	float3 position_local		= tensor.position.xyz;
+// 	float3 position_neighbor	= float3(0., 0., 0.);
+
+// 	bool visible 				= in_frustrum(position_local);
+// 	bool bounded				= length(tensor.prior.xyz-tensor.position.xyz) < CPU.debug.n || CPU.debug.n < 0.;
+
+// 	//DEBUG THREAD ADDRESS		
+// 	int2 coordinate				= view_projection_coordinate(position_local.xyz); 
+// 	coordinate.x				-= scale * 42;
+// 	float depth_prior 			= _ColorTarget[coordinate].w;
+// 	float3 line_offset 			= float3(0., 0., 0.);
+// 	float  line_height 			= .00025;
+// 	float print_distance 		= .075;
+// 	bool print_edges 			= in_frustrum(tensor.position.xyz) && depth < print_distance;
+// 	float fade 					= max(abs(.075-depth), 0.) * rcp(.075);
+// 	float4 print_color 			= float4(.5, .5, .5, 0.); 
+// 	float4 error_color 			= float4(.75, .125, .125, 0.); 
+// 	float4 color 				= print_color;
+	
+// 	scale 						= .0125 * rcp(depth);
+// 	bool edge_error[EDGE_COUNT];
+// 	if(print_edges)
+// 	{
+// 		raster_uint(tensor.address, scale, float4(1., 1., 1., 0.) * .5 * fade, true, coordinate, _ColorTarget);	//thread
+// 		coordinate.x 			+= scale * 8.;
+
+// 		//mark duplicates 
+
+// 		for(int e = 0; e < EDGE_COUNT; e++)
+// 		{
+// 			edge_error[e] 			= edge.address[e] == thread;
+
+// 			for(int f = 0; f < EDGE_COUNT; f++)
+// 			{
+// 				if(f != e)
+// 				{
+// 					edge_error[e]	= edge.address[e] == edge.address[f] || edge_error[e];
+// 				}
+// 			}
+// 		}
+// 	}
+// 	////END DEBUG THREAD ADDRESS
+
+
+// 	////DEBUG EDGE ADDRESSES
+// 	for(int i = 0; i < EDGE_COUNT; i++)
+// 	{
+// 		position_neighbor.xyz 	= _Tensor[edge.address[i]].position.xyz;
+// 		float range 			= length(position_neighbor.xyz - position_local.xyz);
+
+// 		////DEBUG EDGE ADDRESSES
+// 		if(print_edges)
+// 		{
+// 			color 			 	= edge_error[i] ? error_color : print_color;
+// 			coordinate.y		-= scale * 8;
+// 			raster_uint(edge.address[i], scale, color * fade, true, coordinate, _ColorTarget);	 			//thread			
+
+// 		// 	raster_uint(uint(e dge.range[i] * 1000000000.), scale, color * fade, true, coordinate + uint2(scale * 64., 0), _ColorTarget);	 			//thread			
+// 		}
+// 		////END DEBUG EDGE ADDRESSES
+// 	}
+// }
+// #else
+// [numthreads(1, 1, 1)]
+// void Address(uint thread : SV_DispatchThreadID) { }
+// #endif
+
+#ifdef DIAGNOSTIC_MESH
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Mesh(uint thread : SV_DispatchThreadID)
+{			
+	uint address 				= equidistribute_thread(thread);
+	StructTensor tensor 		= _Tensor[address];
+	StructEdge edge 			= _Edge[address];
+	
+	float3 position_local		= tensor.position.xyz;
+	float3 position_neighbor	= float3(0., 0., 0.);
+
+	float depth					= distance_to_view(tensor.position.xyz);						
+	float scale 				= .0125 * rcp(depth);
+	float limit 				=  2048;
+
+	bool visible 				= in_frustrum(position_local);
+	
+	////DEBUG THREAD ADDRESS
+	// float depth_prior 			= _ColorTarget[coordinate].w;	
+	for(int i = 0; i < EDGE_COUNT; i++)
+	{
+		position_neighbor.xyz 	= _Tensor[edge.address[i]].position.xyz;
+		float range 			= length(position_neighbor.xyz - position_local.xyz);
+		
+		bool bounded			= range < CPU.debug.n || CPU.debug.n < 0.;
+
+		////Line to neighbor
+		if(bounded && visible && in_frustrum(position_neighbor))// && range < .1)//CPU.sim.flock.threshold)
+		{	
+			float3 color		= 2. *  _Tensor[edge.address[i]].color.xyz * 1. * clamp(-depth*depth*depth, .04, 4.) * 2.25;
+			// color 				+= dot(tensor.position, cross(float3(1., 1., 1.), position_neighbor.xyz)) * CPU.debug.h;
+			float rate 			= abs(length(_Tensor[edge.address[i]].prior.xyz - _Tensor[edge.address[i]].position.xyz) - length(_Tensor[edge.address[i]].prior1.xyz - _Tensor[edge.address[i]].position.xyz));
+
+			raster_line(position_local, position_neighbor, limit, float4(color, depth), _ColorTarget);								
+			// raster_line(position_local, position_neighbor, limit, float4(rainbow(float(i+1) * rcp(12.)) * .125 * clamp(4.-depth*depth, .04, 4.) * .25, 1.) + .0125, _ColorTarget);							
+		}	
+	}
+}
+#else
+[numthreads(1, 1, 1)]
+void Mesh(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+#ifdef DIAGNOSTIC_COLLISION
+[numthreads(1, 1, 1)]
+void Collision(uint thread : SV_DispatchThreadID)
+{			
+	if(thread == 0)
+	{
+		 	
+// GPU.field.collision.direction	
+
+		float4 color 				= float4(1., 1., 1., 1.);
+		float3 position 			= GPU.field.collision.position.xyz;
+		float limit 				= 8192.;
+		int2 coordinate				= view_projection_coordinate(position); 
+		float depth 				= distance_to_view(position);		
+		float scale 				= .125 * rcp(depth);
+
+		if(in_frustrum(position))																								
+		{							
+			raster_circle(position, scale * 2., 512, color, _ColorTarget);	    			
+		}
+		raster_circle(CPU.rendering.projection.position.xyz + CPU.rendering.projection.direction.xyz * .00001, scale * 2., 512, color, _ColorTarget);	    			
+		
+		// raster_line(position, CPU.rendering.projection.position.xyz - CPU.rendering.projection.direction.xyz * .0001 - float3(0., .001, 0.), 512, float4(1., 1., 1., 1.), _ColorTarget);							
+ 
+		float3 origin 									= position;
+		float depth_prior	 							= 0.;
+		float3 offset 									= float3(0.,0., 0.);
+		float3 normal 									= float3(0.,0., 0.);
+		uint halt 										= 0;
+		uint v 											= 0.;
+		for(int i = 0; i < limit; i++)
+		{
+			offset 										= normalize(spherical_fibonacci(v % limit/2, limit));
+
+			float3x3 rotation 							= aligned_orthonormal_basis(float3(0.,1.,0.), CPU.rendering.projection.position, CPU.rendering.projection.direction, float3(1.,0.,0.)); 
+			offset 										= mul(offset, rotation);
+			v++;
+			position 									= origin + offset * scale *  1e-7;
+			depth										= distance_to_view(position);	
+		
+			normal 										= normalize(offset);
+
+			if(in_frustrum(position))
+			{
+				coordinate								= view_projection_coordinate(position); 	
+
+				if(in_screen(coordinate))
+				{
+					depth_prior							= _ColorTarget[coordinate].w;
+					
+					// if(depth_prior > depth)
+					{							
+						//raster_line(tensor.position.xyz, position, limit, float4(color, 1.), _ColorTarget);							
+						
+						_ColorTarget[coordinate] 	+= float4(rainbow(v * rcp(limit)), depth);	
+					}
+					 			
+				}
+			}
+		
+		}
+	}
+}
+#else
+[numthreads(1, 1, 1)]
+void Collision(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+#ifdef DIAGNOSTIC_INPUT
+[numthreads(THREAD_GROUP_SIZE_X, THREAD_GROUP_SIZE_Y, 1)]
+void Input(uint2 thread : SV_DispatchThreadID)
+{	
+	uint2 resolution            	= CPU.rendering.resolution;    
+
+	if(thread.x < resolution.x && thread.y < resolution.y)
+	{
+		float4 prior 				= _ColorTarget[thread];
+		prior.w 					= prior.w == 0. ? 999999. : prior.w;
+
+	    float2 aspect 				= resolution * rcp(max(resolution.x, resolution.y));
+		float2 uv	 				= thread.xy * rcp(resolution);
+		float3 origin 				= mul(CPU.rendering.projection.to_world, float4(0.,0.,0.,1.)).xyz;
+	   	float3 direction 			= uv_to_ray(uv);
+	   	
+		float3 position 			= float3(0., 0., 0.);		
+		
+		float integral 				= 0.;
+		float step_size				= .0001;
+		float range 				= 0.;
+		float depth 				= .0001;
+		const float iterations 		= 32.;
+		bool hit 					= false;
+		for(float i = 0.; i < iterations; i++)
+		{
+			position 				= origin + direction * depth;
+
+			range 					= map_sobel_force(position);
+
+			if(range < .005)
+			{
+				hit 				= true;
+				integral 			+= abs(range) * .5 + .0125;
+				depth 				+= .0125;
+			}
+			else
+			{
+				depth 				+= range * .85;
+			}
+
+			if(depth >= prior.w) break;				
+		}		 
+
+		if(hit)
+		{
+			float4 color 				= float4(0., 0., 0., depth);
+			color.xyz 					+= integral * .75;
+			
+			_ColorTarget[thread]		+= color;
+		}			
+	}
+}
+#else
+[numthreads(1, 1, 1)]
+void Input(uint2 thread : SV_DispatchThreadID) { }
+#endif
+
+
+#ifdef DIAGNOSTIC_BITMAP
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Bitmap(uint thread : SV_DispatchThreadID)
+{			
+	int2 resolution                 = CPU.rendering.resolution;
+    
+    int scale                       = 1;
+
+    int2 bounds                     = floor(CPU.rendering.resolution * rcp(scale) - scale);
+
+    int column                      = thread % bounds.y;
+    int row                         = thread * rcp(bounds.y) % bounds.x;
+
+    int2 coordinate                	= max(int2(row, column) * scale, 0.);
+
+    if(coordinate.x < resolution.x && coordinate.y < resolution.y)
+    {        
+		uint2 bitmap				= load_64(thread, _Bitmap_Low);	
+
+        float4 color                = float4(0., 0., 0., 0.);
+        color.xyz					+= any(bitmap.x);
+        color.xyz					+= any(bitmap.y);
+        // color.xyz					+= .5;
+
+        if(color.x > 0.)
+        {
+	        for(int y = 0; y < scale; y++)
+	        {
+	            for(int x = 0; x < scale; x++)    
+	            {
+	                _ColorTarget[coordinate + int2(x, y)] = clamp(_ColorTarget[coordinate + int2(x, y)] + color, 0., 1.);
+	            }
+	        }  
+        }      
+    }
+}
+#else
+[numthreads(1, 1, 1)]
+void Bitmap(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+
+#ifdef DIAGNOSTIC_MEMORY
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Memory(uint thread : SV_DispatchThreadID)
+{			
+	int2 resolution                 = CPU.rendering.resolution;
+    
+    int scale                       = 1;
+
+    int2 bounds                     = floor(CPU.rendering.resolution * rcp(scale) - scale);
+
+    int column                      = thread % bounds.y;
+    int row                         = thread * rcp(bounds.y) % bounds.x;
+
+    int2 coordinate                = max(int2(row, column) * scale, 0.);
+
+    if(coordinate.x < resolution.x && coordinate.y < resolution.y)
+    {        
+		StructTensor tensor 		= _Tensor[thread];
+
+        float4 color                = float4(0., 0., 0., 0.);
+        color.xyz					= tensor.color.xyz;
+        color.xyz					+= .0125;
+        color.w						= 1.;
+
+        // if(color.x > 0.)
+        {
+	        for(int y = 0; y < scale; y++)
+	        {
+	            for(int x = 0; x < scale; x++)    
+	            {
+	                _ColorTarget[coordinate + int2(x, y)] = clamp(_ColorTarget[coordinate + int2(x, y)] + color, 0., 1.);
+	            }
+	        }  
+        }      
+    }
+}
+#else
+[numthreads(1, 1, 1)]
+void Memory(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+
+#ifdef DIAGNOSTIC_TARGET
+[numthreads(THREAD_GROUP_SIZE_X, THREAD_GROUP_SIZE_Y, 1)]
+void Target(uint2 thread : SV_DispatchThreadID)
+{			
+	_ColorTarget[thread] = _GeometryTarget[thread];  
+}
+#else
+[numthreads(1, 1, 1)]
+void Target(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+#ifdef DIAGNOSTIC_UV
+[numthreads(THREAD_GROUP_SIZE_X, THREAD_GROUP_SIZE_Y, 1)]
+void UV(uint2 thread : SV_DispatchThreadID)
+{			
+	uint2 resolution            	= CPU.rendering.resolution;    
+
+	if(thread.x < resolution.x && thread.y < resolution.y)
+	{	    
+		float2 uv	 				= thread.xy * rcp(resolution);
+		_ColorTarget[thread]		= float4(uv, 0., 1.);
+
+		// float2 aspect 				= resolution * rcp(max(resolution.x, resolution.y));
+		// float2 p  					= uv * float2(8., 1.);//float2(linear_depth(0.000000001, resolution.x, thread.x), uv.y * 8.);
+		// float2 mouse_uv  			= CPU.mouse.position.xy * rcp(resolution);
+
+		// float w 					= witch_normalized(p.x * mouse_uv.x * 32.);		
+
+		// float4 color 				= float4(0., 0., 0., 1.);
+
+		// color.xy 					+= uv;
+		// color.xyz 					+= abs(p.y - w) < .05 * (.05 * w);
+
+		// _ColorTarget[thread]		= color;
+	}
+}
+#else
+[numthreads(1, 1, 1)]
+void UV(uint thread : SV_DispatchThreadID) { }
+#endif
+
+

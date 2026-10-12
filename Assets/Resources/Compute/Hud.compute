@@ -1,0 +1,41 @@
+#pragma kernel Cursor
+
+#include "Includes\configuration.cginc"
+#include "Includes\rasterization.cginc"
+
+#define RENDER_CURSOR
+
+#ifdef RENDER_CURSOR
+	[numthreads(1, 1, 1)]
+	void Cursor(uint thread : SV_DispatchThreadID) 
+	{
+		uint2 mouse 						= CPU.mouse.position;
+		
+		if(in_screen(mouse))
+		{				
+			float4 color					= float4(1., 1., 1., 1.) * .5;
+			
+			float radius 					= CPU.selection.radius;
+			float circumference 			= pow(radius * 3.14, 2.);
+			float arc						= rcp(circumference);
+
+			int2 coordinate 				= int2(0,0);
+			int2 offset 					= int2(0,0);
+			for(float i = 0.; i < circumference; i++)
+			{	
+				offset						= mul(float2(radius, 0.), rmat(6.28 * i * arc));	
+				coordinate 					= mouse + offset;
+
+				if(in_screen(coordinate))
+				{					
+					_ColorTarget[coordinate]	= float4(_ColorTarget[coordinate].xyz + color.xyz, .00000001);
+				}
+			}
+		}
+	}	
+#else
+	[numthreads(1, 1, 1)]
+	void Cursor(uint thread : SV_DispatchThreadID) { }
+#endif
+
+

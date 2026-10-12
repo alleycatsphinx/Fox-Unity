@@ -1,0 +1,20 @@
+TODO 
+
+fix planet function config inputs - maybe redo? ;F
+add function enums
+bunny? :D
+
+
+cleanup render configuration
+
+fix visuals on the mesh
+
+update the sim code 
+
+update the guassian code to render to the screen as well as a buffer
+
+add rendertarget diagnostics
+
+get collision working ).)
+
+fix other shit too

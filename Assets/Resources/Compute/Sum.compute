@@ -1,0 +1,281 @@
+/*
+    The MIT License (MIT)
+ 
+    Copyright (c) 2004-2019 Microsoft Corp
+    Modified by Carl Emil Carlsen 2018.
+    Modified by Chris Birke 2022.
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy of this
+    software and associated documentation files (the "Software"), to deal in the Software
+    without restriction, including without limitation the rights to use, copy, modify,
+    merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+    permit persons to whom the Software is furnished to do so, subject to the following
+    conditions:
+ 
+    The above copyright notice and this permission notice shall be included in all copies
+    or substantial portions of the Software.
+ 
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+    INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+    PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+    HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+    CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+    OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ 
+    From directx-sdk-samples by Chuck Walbourn:
+    https://github.com/walbourn/directx-sdk-samples/blob/master/AdaptiveTessellationCS40/ScanCS.hlsl
+*/  
+#pragma target 5.0
+
+#pragma kernel Bitmap
+#pragma kernel Tensor
+
+#pragma kernel Threads
+#pragma kernel Groups
+#pragma kernel Combine
+
+#pragma kernel Order
+#pragma kernel Compact
+
+#include "Includes\configuration.cginc"
+#include "Includes\bitwise.cginc"
+#include "Includes\encoding.cginc"
+#include "Includes\hashes.cginc"
+#include "Includes\equidistribution.cginc"
+#include "Includes\matrices.cginc"
+
+#define BITMAP
+#define TENSOR
+#define THREADS
+#define GROUPS
+#define COMBINE
+#define ORDER
+#define COMPACT
+
+#define PREFIX_THREADS 512 
+
+groupshared uint2 groupshare[PREFIX_THREADS];
+
+
+uint prefix_sum(uint thread, uint x )
+{
+    groupshare[thread].xy = uint2(x, 0); 
+
+    //////////////////////////////////////
+    // Up Sweep    
+    //[unroll]
+    for (uint stride = 2; stride <= PREFIX_THREADS; stride <<= 1 )
+    {
+        GroupMemoryBarrierWithGroupSync();
+        
+        if ( (thread & (stride - 1)) == (stride - 1) )
+        {
+            groupshare[thread].x += groupshare[thread - stride/2].x;
+        }
+    }
+
+    if ( thread == (PREFIX_THREADS - 1) ) 
+    {
+        groupshare[thread].x = 0;
+    }
+    //////////////////////////////////////
+
+
+    //////////////////////////////////////
+    // Down Sweep
+    bool n = true;
+
+    [unroll]
+    for ( stride = PREFIX_THREADS / 2; stride >= 1; stride >>= 1 )
+    {
+        GroupMemoryBarrierWithGroupSync();
+
+        uint a = stride - 1;
+        uint b = stride | a;
+
+        if ( n ) // ping-pong between passes
+        {
+            if ( ( thread & b) == b )
+            {
+                groupshare[thread].y = groupshare[thread-stride].x + groupshare[thread].x;
+            } 
+            else
+            if ( (thread & a) == a )
+            {
+                groupshare[thread].y = groupshare[thread+stride].x;
+            } 
+            else        
+            {
+                groupshare[thread].y = groupshare[thread].x;
+            }
+        } 
+        else
+        {
+            if ( (thread & b) == b )
+            {
+                groupshare[thread].x = groupshare[thread-stride].y + groupshare[thread].y;
+            } else
+            if ( (thread & a) == a )
+            {
+                groupshare[thread].x = groupshare[thread+stride].y;
+            } else        
+            {
+                groupshare[thread].x = groupshare[thread].y;
+            }
+        }
+        
+        n = !n;
+    }    
+    //////////////////////////////////////
+
+    return groupshare[thread].y + x;
+}
+
+
+#ifdef BITMAP
+[numthreads(64, 1, 1)]
+void Bitmap( uint thread_id : SV_DispatchThreadID)
+{        
+	uint2 vertices		= load_64(thread_id, _Bitmap_Low);
+
+    if(any(vertices))
+    {
+        uint count      = count_64(vertices);
+        InterlockedAdd(_Prefix_Address[thread_id], count);	
+    }
+}
+#else
+[numthreads(1, 1, 1)]
+void Bitmap(uint thread_id : SV_DispatchThreadID) { }
+#endif
+
+
+#ifdef TENSOR
+[numthreads(64, 1, 1)]
+void Tensor( uint thread_id : SV_DispatchThreadID)
+{             
+    float3 position                     = _Tensor[thread_id].position.xyz;
+    
+    uint address                        = tensor_embedding(position);
+
+    InterlockedAdd(_Prefix_Address[address], 1, _Tensor[thread_id].count); 
+
+    if(thread_id == TENSOR_COUNT-1)
+    { 
+        float3 rotation_euler           = normalize(GPU.encoding.rotation.zxy + equidistribute_cube(CPU.status.frame + CPU.status.time) - .5);
+        rotation_euler                  = any(CPU.encoding.rotation) ? CPU.encoding.rotation : rotation_euler;
+               
+        GPU.encoding.translation        = float3(0.,0.,0.) + .5;
+        GPU.encoding.rotation           = rotation_euler;
+        GPU.encoding.scale              = float3(1., 1., 1.);
+    }       
+}
+#else
+[numthreads(1, 1, 1)]
+void Tensor(uint thread_id : SV_DispatchThreadID) { }
+#endif
+
+
+#ifdef THREADS
+[numthreads(PREFIX_THREADS, 1, 1)]
+void Threads( uint thread_id : SV_DispatchThreadID, uint group_thread_id : SV_GroupThreadID, uint group_index : SV_GroupIndex, uint group_id : SV_GroupID)
+{    
+    _Prefix_Thread[thread_id]               = prefix_sum(group_thread_id, _Prefix_Address[thread_id]);  
+    
+    InterlockedMin(_Prefix_Address[thread_id], 0u);
+}
+#else
+[numthreads(1, 1, 1)]
+void Threads(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+#ifdef GROUPS
+[numthreads( PREFIX_THREADS, 1, 1)]
+void Groups( uint thread_id : SV_DispatchThreadID,  uint group_thread_id : SV_GroupThreadID, uint group_index : SV_GroupIndex)
+{               
+    _Prefix_Group[thread_id]    			= prefix_sum(group_thread_id, _Prefix_Thread[group_index * PREFIX_THREADS - 1]);    
+}
+#else
+[numthreads(1, 1, 1)]
+void Groups(uint thread : SV_DispatchThreadID) { }
+#endif
+ 
+
+#ifdef COMBINE
+[numthreads( PREFIX_THREADS, 1, 1 )]
+void Combine(uint thread_id : SV_DispatchThreadID, uint group_id : SV_GroupID )
+{
+    _Prefix_Sum[thread_id]      			= _Prefix_Group[group_id] + _Prefix_Thread[thread_id];
+ 
+    InterlockedMin(_Prefix_Address[thread_id], 0u);
+}
+#else
+[numthreads(1, 1, 1)]
+void Combine(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+#ifdef ORDER
+[numthreads( 64, 1, 1)]
+void Order(uint thread_id : SV_DispatchThreadID)
+{
+    StructTensor tensor                     = _Tensor[thread_id];
+
+    uint address                            = tensor_embedding(tensor.position.xyz);
+    
+    uint destination                        = clamp(_Prefix_Sum[address] - tensor.count, 0, Prefix_Sum_COUNT); 
+    uint prior                              = 0;
+
+    AllMemoryBarrierWithGroupSync();
+    // AllMemoryBarrier();
+    
+    InterlockedExchange(_Prefix_Address[thread_id],         0, prior);
+    InterlockedExchange(  _Tensor_Map[destination], thread_id, prior); 
+}
+#else
+[numthreads(1, 1, 1)]
+void Order(uint thread : SV_DispatchThreadID) { }
+#endif
+
+
+#ifdef COMPACT
+[numthreads( 64, 1, 1)]
+void Compact(uint thread_id : SV_DispatchThreadID)
+{
+    uint destination                        = _Prefix_Sum[thread_id];
+    _Prefix_Address[thread_id]              = 0;
+
+  	uint2 vertices							= load_64(thread_id, _Bitmap_Low);    
+    uint vertex 							= 0u;
+    uint count 								= count_64(vertices);
+    uint offset 							= 0;
+    uint vertex_address                     = vertex_address_64(thread_id);
+
+    if(count > 0)
+    {
+        for(int i = 0; i < 64; i++)
+    	{  		
+    		vertex 							= vertex_address | i;
+		
+			if(read_64(vertices, i))
+			{
+                if(offset <= count)
+                {
+			     	_Compact[clamp(destination - count + offset, 0, 16777215)] = vertex;
+				    offset++;
+                }
+			}
+		
+    	}
+    }
+	
+	if(thread_id == 262143)
+	{
+		// GPU.data.sum 						= _Prefix_Sum[262143]; //total count
+	}	
+}
+#else
+[numthreads(1, 1, 1)]
+void Compact(uint thread : SV_DispatchThreadID) { }
+#endif

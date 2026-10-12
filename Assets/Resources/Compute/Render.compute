@@ -1,0 +1,363 @@
+#pragma kernel Field
+#pragma kernel Tensor
+
+#include "Includes\configuration.cginc"
+#include "Includes\encoding.cginc"
+#include "Includes\colorgradients.cginc"
+#include "Includes\rasterization.cginc"
+#include "Includes\spherical_fibonacci.cginc"
+#include "Includes\hashes.cginc"
+#include "Includes\noise.cginc"
+#include "Includes\matrices.cginc"
+#include "Includes\lighting.cginc"
+#include "Includes\map.cginc"
+
+// #define DEBUG_STEP_COUNT 
+  
+#define RENDER_FIELD
+#define RENDER_TENSOR
+
+float linear_depth(in float near_plane, in float far_plane, in float depth) 			
+{
+	return (near_plane * far_plane) / (far_plane - depth * (far_plane - near_plane));	
+} 
+
+float witch(in float x, in float y)
+{
+	return y * y * y * 8. * rcp(x * x + 4. * y * y);
+}
+
+
+float focus(float depth, float x, float y) 
+{
+	return depth * rcp(depth * depth * x + 1.) * y;
+}
+
+
+float focus(float depth) 
+{
+	//depth = linear_depth(CPU.rendering.threshold, CPU.rendering.projection.far, depth);
+	return focus(depth, CPU.rendering.ray.focus.x, CPU.rendering.ray.focus.y);	
+}
+
+
+
+float sun(float3 viewDir, float3 sunDir, float sunSize, float sunFalloff)
+{
+    // Cosine of angle between view direction and sun direction
+    float alignment = dot(viewDir, -sunDir); // 1 = perfect alignment
+
+    // Make it smooth and controllable
+    float sun = exp((alignment - 1.0) * sunFalloff);
+
+    // Clamp to avoid infinite brightness and scale by size
+    return saturate(sun) * sunSize;
+}
+
+
+float refine_bisection(float3 origin, float3 rd, float ta, float tb)
+{
+    float fa 			= map(origin + rd * ta);
+    float fb 			= map(origin + rd * tb);
+
+    // float tolerance		= .00000001;//CPU.debug.n;
+    // float threshold 	= 0.;//CPU.debug.o;
+    // float minstep 		= .0000000001;//CPU.debug.p;
+
+     float tolerance	= CPU.debug.g;
+    float threshold 	= CPU.debug.h;
+    float minstep 		= CPU.debug.i;
+
+    // If no sign change, just return midpoint (paranoid guard).
+    // if (fa * fb > 0.0) 
+    // {
+    // 	return 0.5 * (ta + tb);
+    // }
+
+    for (int i = 0; i < 16; ++i) 
+    {
+        const float tm 	= .5 * (ta + tb);
+        const float fm 	= map(origin + rd * tm);
+
+        // Converged in value or interval size
+        if (abs(fm) == threshold || abs(tb - ta) <= tolerance)
+        {
+            return tm;
+        }
+
+        // Keep the sub-interval that brackets the root
+        if (fa * fm > 0.) 
+		{ 
+			ta 			= tm; 
+			fa 			= fm; 
+		}
+        else               
+        { 
+        	tb 			= tm; 
+        	fb 			= fm; 
+    	}
+    }
+
+    return .5 * (ta + tb);
+}
+
+float3 uv_to_equirectangular_ray(float2 uv)
+{
+	const float pi  = 4. * atan(1.);
+	uv.x            = frac(uv.x);
+	float2 theta    = uv * float2(pi + pi, pi);
+	return float3(cos(theta.y) * cos(theta.x), sin(theta.y), cos(theta.y) * sin(theta.x));
+}
+
+
+///////////////////////////////////
+#ifdef RENDER_FIELD
+[numthreads(THREAD_GROUP_SIZE_X, THREAD_GROUP_SIZE_Y, 1)]
+void Field(uint2 thread : SV_DispatchThreadID)
+{      
+	uint2 resolution            	= CPU.rendering.resolution;    
+
+	if(thread.x < resolution.x && thread.y < resolution.y)
+	{
+	    float2 aspect 				= resolution * rcp(max(resolution.x, resolution.y));
+		float2 uv	 				= thread.xy * rcp(resolution);
+		float3 origin 				= mul(CPU.rendering.projection.to_world, float4(0.,0.,0.,1.)).xyz;
+	   	float3 direction 			= uv_to_ray(uv);
+	   	// float3 direction 			= uv_to_equirectangular_ray(uv); //needs adjustment 
+	   	
+		float3 position 			= float3(0., 0., 0.);		
+		float depth 				= 0.;
+
+		///////////// reprojection experiment
+		//// currently NOT reprojecting for proper sampling - just sampling around the prior center picture - reprojection matrix not working yet >.<
+		///need to try proper reprojection (spent 4 hours only to later realize the gpu buffer was getting copied from the cpu at the wrong time and therefore being identical...)
+		// int2 r 						= CPU.rendering.resolution - 1;
+		// int2 e 						= int2(1,1);
+  
+		// float4 position_center		= _GeometryTarget[thread];	
+		// float4 position_right		= _GeometryTarget[clamp(thread + int2( 1,  0) * aspect, e, r)];	
+		// float4 position_down		= _GeometryTarget[clamp(thread + int2( 0, -1) * aspect, e, r)];	
+		// float4 position_left		= _GeometryTarget[clamp(thread + int2(-1,  0) * aspect, e, r)];	
+		// float4 position_up			= _GeometryTarget[clamp(thread + int2( 0,  1) * aspect, e, r)];	
+		 
+		// float4 position_prior 		= (position_center + position_right + position_down + position_left + position_up) * .2;
+		// float depth_prior  			= max(position_center.w - 1., 0.);
+		// // float3 motion_vector 		= abs(position_prior-position); //pseudo motion vector 
+		// float min_depth 			= map(origin);
+		// float depth 				= (min(min(min(min(position_center.w, position_right.w), position_down.w), position_left.w), position_up.w) - 1.) * min(min_depth * CPU.rendering.debug.w, CPU.rendering.debug.z);
+		// // depth 						-= dot(CPU.rendering.projection.direction-GPU.rendering.projection.direction, float3(1., 1., 1.)) * rcp(depth);
+		// depth 						= max(depth, 0.);
+		// depth 						= depth == 0. ? abs(min_depth) : depth;
+
+		// float depth_initial 		= depth;
+		///////////// reprojection experiment
+
+  		
+		float fog  					= 0.;
+		bool hit 					= false;
+		float prev_range 			= 1.;//length(_GeometryTarget[thread].xyz - origin); 
+		float step_ratio 			= 1.;//_GeometryTarget[thread].w;
+		float accelleration 		= 1.;//_GeometryTarget[thread].w;
+
+		float step 					= 0.;
+		float near_plane 			= CPU.rendering.projection.near;
+		float far_plane 			= CPU.rendering.projection.far;
+		float threshold 			= CPU.rendering.ray.threshold;
+		float range 				= far_plane;
+		
+		const float iterations 		= 512.;
+		for(float i = 0.; i < iterations; i++)
+		{
+			if(depth < far_plane && range >= threshold)
+			{
+				step++;				
+
+				position 			= origin + direction * depth;			
+				
+				range				= map(position);					
+			    
+			    step_ratio 			= clamp(abs(range) * rcp(prev_range), .5, 2.);  
+		        
+		        depth 				+= min(range, range * step_ratio) * focus(CPU.rendering.ray.focus.x * i * rcp(iterations), CPU.rendering.ray.focus.z, CPU.rendering.ray.focus.w) * 2.; 
+
+		        prev_range 			= range;	
+
+		        threshold 			= max(focus(depth), CPU.rendering.ray.threshold);//lerp(threshold, focus(depth), .5);
+			}
+			else
+			{
+
+				hit 				= depth < far_plane;
+
+				if(hit)
+				{						
+					if(CPU.rendering.ray.epsilon == 0.)
+					{
+						depth		= refine_bisection(origin, direction, depth, depth - prev_range);
+
+						position	= origin + direction * depth;	
+					}
+					
+				}
+
+				depth 				= length(origin-position);//min(length(origin-position), far_plane);		
+
+				break;
+			}
+		}		 
+
+
+		float2x2 rotation_xz		= rmat(CPU.status.time * CPU.rendering.debug.x);
+		float2x2 rotation_xy		= rmat(CPU.status.time * CPU.rendering.debug.y);
+
+		float3 star_direction 		= direction;
+		star_direction.xy 			= mul(star_direction.xy, rotation_xy);
+		star_direction.xz 			= mul(star_direction.xz, rotation_xz);
+
+		float3 light_position		= CPU.rendering.light.position;
+		light_position.xy 			= mul(light_position.xy, rotation_xy);
+		light_position.xz 			= mul(light_position.xz, rotation_xz);
+
+		float3 light_direction  	= normalize(light_position - position);
+		float3 light_color			= 1. + CPU.rendering.light.color.xyz;
+		float light_intensity		= CPU.rendering.light.intensity;
+			
+		float3 color 				= float3(0., 0., 0.);
+		if(hit)
+		{						
+			float epsilon 			= threshold; 			
+			float3 normal 			= normalize(derivative(position, epsilon));
+
+			if(map(position + normal * epsilon) < 0.)
+			{
+				normal 				*= -1.;
+			}
+
+			#define LIGHT			
+			#ifdef LIGHT		
+			float metallic 			= CPU.rendering.material.index;
+		    float roughness 		= CPU.rendering.material.scattering;
+
+			float ao0				= quick_ao(position, normal, epsilon);
+			float ao1 				= ambient_occlusion(position, normal, depth);		
+			float occlusion 		= clamp(ao1 * CPU.rendering.occlusion.debug.w, .2, 1.);
+
+			// float s0 				= shadow(position, light_direction, CPU.rendering.shadow.debug.w, CPU.rendering.shadow.debug.x, CPU.rendering.shadow.debug.x);
+			// float s1 				= shadow(position, light_direction, CPU.rendering.shadow.debug.w, CPU.rendering.shadow.debug.y, CPU.rendering.shadow.debug.y);
+			// float s2 				= shadow(position, light_direction, CPU.rendering.shadow.debug.w, CPU.rendering.shadow.debug.z, CPU.rendering.shadow.debug.z);	
+
+			float s0 				= clamp(shadow(position, light_direction * CPU.rendering.shadow.debug.w, 1.,  .2,  .01) * CPU.rendering.shadow.debug.x, 0., 1.);
+			float s1 				= clamp(shadow(position, light_direction * CPU.rendering.shadow.debug.w, .1, .01, .001) * CPU.rendering.shadow.debug.y, 0., 1.);
+			float s2 				= clamp(shadow(position, light_direction * CPU.rendering.shadow.debug.w, .5, 1e-08,2e-07) * CPU.rendering.shadow.debug.z, 0., 1.);	
+
+			float shadows			= clamp(s0 * s1 * s2 * 2., .0625, 1.);
+
+			float edges 			= curvature(position, max(epsilon * 4., 1e-08));
+			
+			float3 haze 			= sphericalharmonic(normalize(light_direction + direction)) * .5 + .25;			
+			haze 					*= log(float(step) * CPU.rendering.atmosphere.density) * CPU.rendering.atmosphere.haze;			
+ 			haze 					= saturate(haze * (shadows * occlusion + .25));
+
+			float4 tint 			= CPU.rendering.material.tint;
+		    float3 map_color 		= map_fractal_color(position);
+		    float3 map_normal 		= normal;			
+
+
+			float3 ambient 			= (1. - float3(.5, .5, .5) * sphericalharmonic(-normal)) * CPU.rendering.atmosphere.ambient;
+		
+			float3 albedo 			=  tint.xyz  * tint.w
+									* (map_color * CPU.rendering.material.map 
+									+  normal    * CPU.rendering.material.normal
+									+  edges 	 * CPU.rendering.material.edges);	
+
+			albedo 					= lerp(grayscale(albedo), albedo, CPU.rendering.material.saturation);
+			albedo 					= clamp(albedo, 0., 1.);		
+							
+ 			color 					= shade(albedo, metallic, roughness, normal, -direction, light_direction, light_color, light_intensity);								 						
+			color 					*= shadows;
+			color 					*= occlusion;		
+			color 					+= ambient * occlusion; 							
+			color.xyz 				+= haze;			
+		
+
+			#else
+			float edges 			= curvature(position, epsilon * 2.);
+			color.xyz 				= dot(normal, light_direction) * .5 + edges;
+			#endif			
+		}
+		else
+		{
+			// float3 light_color		= sphericalharmonic(-star_direction);
+			// light_color				/= normalize(light_color);
+			// float3 fn 				= normalize(floor(star_direction * 512));
+			// float s 				= dot(star_direction, normalize(hash3(fn * 31.)-.5));
+			// s 						= max(log(rcp((s) * 512.)), 0.);						
+			// color 					+= s;
+			color.xyz 				+= step * .025  * CPU.rendering.atmosphere.horizon;	
+			// color 					+= light_color * .1;
+
+			// color 					+= sun(direction, star_direction, CPU.rendering.occlusion.debug.x,  CPU.rendering.occlusion.debug.y);
+		} 
+ 		
+ 		color.xyz 					= max(color.xyz, 0.);
+		color 						= pow(abs(color * CPU.rendering.brightness), float3(1., 1., 1.) * CPU.rendering.gamma);
+		color 						= clamp(color, 0., 1.);
+		
+		float4 prior 				= _ColorTarget[thread];
+
+		if(prior.w <= depth)
+		{
+			_ColorTarget[thread]	= float4(color, depth);						
+		}
+		
+		// _GeometryTarget[thread]  	= float4(position, 1. + depth);
+
+	
+		#ifdef DEBUG_STEP_COUNT	
+		if(CPU.rendering.diagnostic.step_count)
+		{
+			int tile_resolution 		= 16;
+			int2 tile_coordinate		= thread % tile_resolution;
+			
+			float3 step_visualization  	= rainbow(1. - log(float(step)) * log(float(step) * .1) * .1); //CPU.debug.o) * CPU.debug.p);
+
+			step_visualization 			-= log(float(step)) * .2 * .125;
+			step_visualization			= clamp(step_visualization, 0., 1.);
+			
+			_DiagnosticTarget[thread]	*= .75;
+
+			if(tile_coordinate.x == 0 && tile_coordinate.y == 0)
+			{
+				raster_uint(step, 1., float4(1., 1., 1., 0.) * .015, true, thread + tile_resolution * .5 * aspect, _DiagnosticTarget);			
+			}	
+	
+			_ColorTarget[thread]  		= _DiagnosticTarget[thread];			
+			_DiagnosticTarget[thread] 	= lerp(_DiagnosticTarget[thread], float4(step_visualization, 0.), .125);
+		}
+		#endif
+	}
+}
+#else
+[numthreads(1, 1, 1)]
+void Field(uint2 thread : SV_DispatchThreadID) { }
+#endif
+
+
+#ifdef RENDER_TENSOR
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Tensor(uint thread : SV_DispatchThreadID)
+{	
+	StructTensor tensor 		= _Tensor[thread];
+	StructEdge edge 			= _Edge[thread];
+	
+	float depth					= distance_to_view(tensor.position.xyz);
+	float scale 				= .5 * rcp(depth);
+
+	////CIRCLE AT POSITION
+	raster_circle(tensor.position.xyz, scale, 512, float4(tensor.color.xyz + 1., 1.), _ColorTarget);	
+	////
+}
+#else
+[numthreads(1, 1, 1)]
+void Tensor(uint2 thread : SV_DispatchThreadID) { }
+#endif

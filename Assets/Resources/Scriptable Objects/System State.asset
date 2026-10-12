@@ -1,0 +1,615 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: df934b3ea3d924644b0920b38f9fa4a3, type: 3}
+  m_Name: System State
+  m_EditorClassIdentifier: 
+  commands:
+    data:
+      bitmap:
+        combine: 0
+        tree: 0
+        clear: 0
+        field: 0
+        tensor: 0
+        guassian: 0
+        view: 0
+        focus: 0
+        collision: 0
+      field:
+        function: 2
+      tensor:
+        map: 0
+        sum: 0
+        mesh: 0
+        iterations: 1
+      guassian:
+        load: 0
+    sim:
+      initialize: 0
+      field: 0
+      bitmap: 0
+      flow: 0
+      update: 0
+    render:
+      field: 1
+      tensor: 0
+      prior: 0
+      radiance: 0
+      cursor: 0
+      composite: 0
+    diagnostic:
+      vertex: 0
+      volume: 0
+      derivative: 0
+      tensor: 0
+      address: 0
+      curve: 0
+      mesh: 0
+      collision: 0
+      input: 0
+      bitmap: 0
+      memory: 0
+      target: 0
+      uv: 0
+    display:
+      help: 1
+      programs: 1
+      status: 1
+      notes: 1
+      ui: 1
+    motion:
+      forward: 0
+      back: 0
+      left: 0
+      right: 0
+      up: 0
+      down: 0
+      fast: 0
+      slow: 0
+      orbit: 0
+      auto_rotate: 0
+      active: 0
+      waypoint:
+        first: 0
+        prior: 0
+        next: 0
+        move: 0
+        index: 0
+        create: 0
+    waypoint: []
+    screenshot_index: 40
+  configuration:
+    status:
+      frame: 3038
+      fps: 60
+      time: 63.505283
+      delta_time: 0.2669966
+    mouse:
+      position: {x: 522, y: 1015}
+      delta: {x: 0, y: 0}
+      wheels: {x: 0, y: 0, z: 0}
+      buttons: 0
+    selection:
+      ray: {x: 0.36083803, y: 0.25048798, z: 0.89836055}
+      position: {x: 0, y: 0, z: 0}
+      radius: 32
+      address: 0
+    encoding:
+      octave: 0
+      transform:
+        e00: 1
+        e01: 0
+        e02: 0
+        e03: 0
+        e10: 0
+        e11: 1
+        e12: 0
+        e13: 0
+        e20: 0
+        e21: 0
+        e22: 1
+        e23: 0
+        e30: 0
+        e31: 0
+        e32: 0
+        e33: 1
+      translation: {x: 0, y: 0, z: 0}
+      rotation: {x: 0, y: 0, z: 0}
+      scale: {x: 0.5, y: 1, z: 7}
+    rendering:
+      projection:
+        position: {x: -0.2255096, y: 0.18180086, z: -0.49087796}
+        direction: {x: 0.39565077, y: -0.31896493, z: 0.86123276}
+        fov: 0.59999996
+        near: 0.01
+        far: 1000
+        to_view:
+          e00: 0.9086971
+          e01: 0
+          e02: -0.41745594
+          e03: 0
+          e10: 0.13315381
+          e11: 0.94776654
+          e12: 0.28984252
+          e13: -0.0000000018626451
+          e20: -0.39565077
+          e21: 0.31896493
+          e22: -0.86123276
+          e23: -0.5699713
+          e30: 0
+          e31: 0
+          e32: 0
+          e33: 1
+        to_world:
+          e00: 0.9086972
+          e01: 0.13315378
+          e02: -0.3956507
+          e03: -0.22550957
+          e10: -0.000000015722396
+          e11: 0.9477665
+          e12: 0.3189649
+          e13: 0.18180083
+          e20: -0.41745594
+          e21: 0.2898425
+          e22: -0.8612327
+          e23: -0.49087793
+          e30: 0
+          e31: 0
+          e32: 0
+          e33: 1
+        view:
+          e00: 1.4517541
+          e01: 0
+          e02: 0
+          e03: 0
+          e10: 0
+          e11: 1.7320508
+          e12: 0
+          e13: 0
+          e20: 0
+          e21: 0
+          e22: -1.00002
+          e23: -0.0200002
+          e30: 0
+          e31: 0
+          e32: -1
+          e33: 0
+        inverse:
+          e00: 0.6888219
+          e01: 0
+          e02: 0
+          e03: 0
+          e10: 0
+          e11: 0.57735026
+          e12: 0
+          e13: 0
+          e20: -0
+          e21: -0
+          e22: -0.00000005960345
+          e23: -1
+          e30: 0
+          e31: 0
+          e32: -49.999496
+          e33: 50.0005
+      ray:
+        threshold: 0.00000002
+        focus: {x: 0.93, y: 0.0005, z: 0.5, w: 2}
+        epsilon: 1
+      material:
+        tint: {x: 0.5, y: 0.5, z: 0.5, w: 1}
+        scattering: 0.25
+        index: 0.76
+        saturation: 0.37
+        normal: 0.1
+        map: 0.06
+        edges: 0.67
+      light:
+        position: {x: -3050, y: 8192, z: -500}
+        color: {x: 1, y: 1, z: 1, w: 1}
+        intensity: 32
+      shadow:
+        debug: {x: 0.66, y: 0.46, z: 0.5, w: 3}
+      occlusion:
+        debug: {x: 0.03, y: 2.82, z: 0.09, w: 8.4}
+      atmosphere:
+        ambient: -0.31
+        haze: 1.08
+        horizon: 0.32
+        density: 0.15
+      diagnostic:
+        step_count: 0
+        debug: {x: 256, y: 0, z: 0, w: 0}
+      composition:
+        prior: 0.9
+        geometry: 0
+        diagnostic: 0
+      brightness: 0.25
+      gamma: 1.66
+      resolution:
+        x: 1137
+        y: 953
+      debug: {x: 0, y: 0, z: 1, w: 32}
+    field:
+      function: 2
+      sphere:
+        radius: 0.25
+      fractal:
+        rotation: {x: 32.5, y: 5.29, z: 14.13, w: 1.54}
+        translation: {x: 1.08, y: 0.5, z: 1.52, w: 0.13}
+        threshold: 0
+      planet:
+        frequency: 0.87
+        amplitude: 0
+        lacunarity: 0
+        drift: 0
+        iterations: 0
+        magnitude: 0
+        threshold: 0
+      collision:
+        origin: {x: -0.2255096, y: 0.18180086, z: -0.49087796, w: 0}
+        position: {x: 0, y: 0, z: 0, w: 0}
+        direction: {x: 0, y: 0, z: 0, w: 0}
+      transform:
+        e00: 1
+        e01: 0
+        e02: 0
+        e03: 0
+        e10: 0
+        e11: 1
+        e12: 0
+        e13: 0
+        e20: 0
+        e21: 0
+        e22: 1
+        e23: 0
+        e30: 0
+        e31: 0
+        e32: 0
+        e33: 1
+    sim:
+      flow:
+        cohesion: 7.01
+        alignment: 3
+        avoidance: 0.1
+        temperature: 0.64
+        convection: 0.11
+        dispersion: 0.9
+        velocity: 0.18
+        decelleration: 0.89
+        threshold: 0.01
+      input:
+        length: 32
+        radius: 0.03
+        amplitude: 2
+        temperature: 0.2
+        velocity: 0.02
+      field:
+        threshold: 0.06
+        restitution: 0.15
+        force: 1
+        gravity: -0.0004
+      bounds:
+        function: 1
+        radius: 1
+        restitution: 1
+        force: 0
+      bitmap:
+        restitution: 0.001
+        radius: 0.00014
+      color:
+        type: 0
+        density: 12
+        direction: 1
+        temperature: 0
+        temperature_delta: 1
+        density_delta: 26.3
+        brightness: 0.18
+        gamma: 1
+        interpolant: 0.95
+    guassian:
+      transform:
+        e00: 0.05772148
+        e01: -0
+        e02: 0.05539161
+        e03: -0.18
+        e10: 0
+        e11: -0.08
+        e12: 0
+        e13: 0.04
+        e20: -0.05539161
+        e21: -0
+        e22: 0.05772148
+        e23: -0.07
+        e30: 0
+        e31: 0
+        e32: 0
+        e33: 1
+    debug:
+      a: 6.93
+      b: 7.81
+      c: 2.2
+      d: 3.39
+      e: -5.7
+      f: 0.66
+      g: 0.66
+      h: 1.42
+      i: 0.03
+      j: 0.84
+      k: 11
+      l: 1
+      m: 18
+      n: 1.63
+      o: 0.1
+      p: 0
+  gpu:
+    status:
+      frame: 2442
+      fps: 60
+      time: 64.60615
+      delta_time: 0.021750709
+    mouse:
+      position: {x: 1294, y: 828}
+      delta: {x: 0, y: 0}
+      wheels: {x: 0, y: 0, z: 0}
+      buttons: 0
+    selection:
+      ray: {x: 0.34072378, y: 0.45602214, z: -0.8221625}
+      position: {x: 0, y: 0, z: 0}
+      radius: 32
+      address: 0
+    encoding:
+      octave: 0
+      transform:
+        e00: 1
+        e01: 0
+        e02: 0
+        e03: 0
+        e10: 0
+        e11: 1
+        e12: 0
+        e13: 0
+        e20: 0
+        e21: 0
+        e22: 1
+        e23: 0
+        e30: 0
+        e31: 0
+        e32: 0
+        e33: 1
+      translation: {x: 0, y: 0, z: 0}
+      rotation: {x: 0, y: 0, z: 0}
+      scale: {x: 0.5, y: 1, z: 7}
+    rendering:
+      projection:
+        position: {x: -2.2514238, y: -0.55556875, z: 0.9340419}
+        direction: {x: 0.9005695, y: 0.2222275, z: -0.37361678}
+        fov: 0.59999996
+        near: 0.01
+        far: 1000
+        to_view:
+          e00: -0.38319874
+          e01: -0.000000007450581
+          e02: -0.92366594
+          e03: -0.000000059604645
+          e10: -0.20526397
+          e11: 0.97499484
+          e12: 0.08515729
+          e13: -0.000000059604645
+          e20: -0.9005695
+          e21: -0.2222275
+          e22: 0.3736168
+          e23: -2.5
+          e30: 0
+          e31: 0
+          e32: 0
+          e33: 1
+        to_world:
+          e00: -0.3831987
+          e01: -0.20526396
+          e02: -0.90056944
+          e03: -2.2514236
+          e10: -0.00000001341953
+          e11: 0.97499484
+          e12: -0.2222275
+          e13: -0.5555687
+          e20: -0.9236659
+          e21: 0.08515729
+          e22: 0.37361678
+          e23: 0.93404186
+          e30: 0
+          e31: 0
+          e32: 0
+          e33: 1
+        view:
+          e00: 1.4517541
+          e01: 0
+          e02: 0
+          e03: 0
+          e10: 0
+          e11: 1.7320508
+          e12: 0
+          e13: 0
+          e20: 0
+          e21: 0
+          e22: -1.00002
+          e23: -0.0200002
+          e30: 0
+          e31: 0
+          e32: -1
+          e33: 0
+        inverse:
+          e00: 0.6888219
+          e01: 0
+          e02: 0
+          e03: 0
+          e10: 0
+          e11: 0.57735026
+          e12: 0
+          e13: 0
+          e20: -0
+          e21: -0
+          e22: -0.00000005960345
+          e23: -1
+          e30: 0
+          e31: 0
+          e32: -49.999496
+          e33: 50.0005
+      ray:
+        threshold: 0.00000002
+        focus: {x: 0.93, y: 0.0005, z: 0.5, w: 2}
+        epsilon: 1
+      material:
+        tint: {x: 0.5, y: 0.5, z: 0.5, w: 1}
+        scattering: 0.25
+        index: 0.76
+        saturation: 0.37
+        normal: 0.1
+        map: 0.06
+        edges: 0.67
+      light:
+        position: {x: -3050, y: 8192, z: -500}
+        color: {x: 1, y: 1, z: 1, w: 1}
+        intensity: 32
+      shadow:
+        debug: {x: 0.66, y: 0.46, z: 0.5, w: 3}
+      occlusion:
+        debug: {x: 0.03, y: 2.82, z: 0.09, w: 8.4}
+      atmosphere:
+        ambient: -0.31
+        haze: 1.08
+        horizon: 0.32
+        density: 0.15
+      diagnostic:
+        step_count: 0
+        debug: {x: 256, y: 0, z: 0, w: 0}
+      composition:
+        prior: 0.9
+        geometry: 0
+        diagnostic: 0
+      brightness: 0.25
+      gamma: 1.66
+      resolution:
+        x: 1137
+        y: 953
+      debug: {x: 0, y: 0, z: 1, w: 32}
+    field:
+      function: 2
+      sphere:
+        radius: 0.25
+      fractal:
+        rotation: {x: 32.5, y: 5.29, z: 14.13, w: 1.54}
+        translation: {x: 1.08, y: 0.5, z: 1.52, w: 0.13}
+        threshold: 0
+      planet:
+        frequency: 0.87
+        amplitude: 0
+        lacunarity: 0
+        drift: 0
+        iterations: 0
+        magnitude: 0
+        threshold: 0
+      collision:
+        origin: {x: -2.2514238, y: -0.55556875, z: 0.9340419, w: 0}
+        position: {x: 0, y: 0, z: 0, w: 0}
+        direction: {x: 0, y: 0, z: 0, w: 0}
+      transform:
+        e00: 1
+        e01: 0
+        e02: 0
+        e03: 0
+        e10: 0
+        e11: 1
+        e12: 0
+        e13: 0
+        e20: 0
+        e21: 0
+        e22: 1
+        e23: 0
+        e30: 0
+        e31: 0
+        e32: 0
+        e33: 1
+    sim:
+      flow:
+        cohesion: 7.01
+        alignment: 3
+        avoidance: 0.1
+        temperature: 0.64
+        convection: 0.11
+        dispersion: 0.9
+        velocity: 0.18
+        decelleration: 0.89
+        threshold: 0.01
+      input:
+        length: 32
+        radius: 0.03
+        amplitude: 2
+        temperature: 0.2
+        velocity: 0.02
+      field:
+        threshold: 0.06
+        restitution: 0.15
+        force: 1
+        gravity: -0.0004
+      bounds:
+        function: 1
+        radius: 1
+        restitution: 1
+        force: 0
+      bitmap:
+        restitution: 0.001
+        radius: 0.00014
+      color:
+        type: 0
+        density: 12
+        direction: 1
+        temperature: 0
+        temperature_delta: 1
+        density_delta: 26.3
+        brightness: 0.18
+        gamma: 1
+        interpolant: 0.95
+    guassian:
+      transform:
+        e00: 0.05772148
+        e01: -0
+        e02: 0.05539161
+        e03: -0.18
+        e10: 0
+        e11: -0.08
+        e12: 0
+        e13: 0.04
+        e20: -0.05539161
+        e21: -0
+        e22: 0.05772148
+        e23: -0.07
+        e30: 0
+        e31: 0
+        e32: 0
+        e33: 1
+    debug:
+      a: 6.93
+      b: 7.81
+      c: 2.2
+      d: 3.39
+      e: -5.7
+      f: 0.66
+      g: 0.66
+      h: 1.42
+      i: 0.03
+      j: 0.84
+      k: 11
+      l: 1
+      m: 18
+      n: 1.63
+      o: 0.1
+      p: 0

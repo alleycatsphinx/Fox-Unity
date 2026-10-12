@@ -1,0 +1,224 @@
+#pragma kernel Tensor
+
+#include "Includes\configuration.cginc"
+
+#define GROUP_SHARE_LENGTH 128
+#define MESH_TENSOR
+
+groupshared float3 groupshare_position[GROUP_SHARE_LENGTH];
+groupshared uint    groupshare_address[GROUP_SHARE_LENGTH];
+ 
+#define SWAP(a, b) (((a) ^= (b)), ((b) ^= (a)), ((a) ^= (b)))
+
+float measure(in float3 a, in float3 b)
+{
+    return (a.x == b.x && a.y == b.y && a.z == b.z) ? 0x00000000 : distance(a, b);
+}
+
+
+void compare(inout uint address_a, inout uint address_b, inout float range_a, inout float range_b)
+{   
+    if(range_a > range_b)
+    {
+        SWAP(address_a, address_b);
+        
+        float temp  = range_a;
+        range_a     = range_b;
+        range_b     = temp;    
+    }  
+}
+
+
+void bitonic_edge_sort(inout float range[EDGE_COUNT], inout uint address[EDGE_COUNT]) 
+{
+    for (uint k = 2; k <= EDGE_COUNT; k <<= 1) 
+    {
+        for (uint j = k >> 1; j > 0; j >>= 1) 
+        {
+            for (uint i = 0; i < EDGE_COUNT; ++i) 
+            {
+                uint ixj = i ^ j;
+                if (ixj > i) 
+                {
+                    bool ascending = ((i & k) == 0);
+                    if ((range[i] > range[ixj]) == ascending) 
+                    {
+                        // Swap
+                        uint temp_address   = address[i];
+                        address[i]          = address[ixj];
+                        address[ixj]        = temp_address;
+
+                        float temp_range    = range[i];
+                        range[i]            = range[ixj];
+                        range[ixj]          = temp_range;
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+#ifdef MESH_TENSOR
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Tensor(uint thread : SV_DispatchThreadID, uint group_thread : SV_GroupThreadID)
+{
+    uint mapped_address                         = _Tensor_Map[thread];      //load the mapped address from the sorted list of spatially hashed pointers
+    mapped_address                              = mapped_address > GROUP_SHARE_LENGTH/2 ? mapped_address - GROUP_SHARE_LENGTH/2 : Tensor_COUNT - GROUP_SHARE_LENGTH/2 + mapped_address; //offset mapped address range to both sides of the pointer
+
+    StructTensor tensor                         = _Tensor[mapped_address];  //load the tensor data from that address - slow global memory, but no read conflicts
+    StructEdge edge                             = _Edge[mapped_address];    //load it's associated edges
+    
+    groupshare_position[group_thread]           = tensor.position.xyz;      //copy this local tensor and address to the high speed local groupshare memory caches
+    groupshare_address[group_thread]            = tensor.address;
+
+    uint address[EDGE_COUNT]                    = edge.address;
+
+    GroupMemoryBarrierWithGroupSync();                                      //wait until all group threads have finished reading to ensure determinancy 
+
+    float range[EDGE_COUNT];
+    uint modulus                                = (float)GROUP_SHARE_LENGTH * sqrt(5.) * .5 - .5;
+    uint replacement_address                    = (group_thread + modulus) % GROUP_SHARE_LENGTH;          
+
+    //remove duplicates, invalid edges and gather ranges - possibly better to do after sort when duplicates will be successive
+    [unroll]
+    for(uint s = 0; s < EDGE_COUNT; s++)
+    {       
+        address[s]                              = address[s] % Tensor_COUNT;
+
+        [unroll] 
+        for(uint t = s + 1; t < EDGE_COUNT; t++)
+        {   
+            if(address[s] == address[t])// || address[s] == 0xFFFFFFFF || address[s] > Tensor_COUNT || address[s] == mapped_address)
+            {
+                address[t]                      = groupshare_address[replacement_address];          //cull and replace any duplicate address entries with a different address from the groupshare list
+                replacement_address             = (replacement_address + modulus) % GROUP_SHARE_LENGTH;      
+            }
+        }
+
+        range[s]                                = measure(tensor.position.xyz, _Tensor[address[s]].position.xyz);
+    }
+                                                                                    
+
+    //sort the edges nearest to furthest
+    bitonic_edge_sort(range, address);
+
+    ////SEARCH GROUPSHARE NEIGHBORS
+    float range_neighbor                        = 0.;
+    uint address_neighbor                       = 0;
+    bool duplicate                              = false;
+    for(uint k = 0; k < GROUP_SHARE_LENGTH; k++)
+    {           
+        if(groupshare_address[k] != mapped_address)                                                     //exclude the local address
+        {
+            range_neighbor                      = measure(groupshare_position[k], tensor.position.xyz); //get the range from the groupshare tensor
+
+            if(range_neighbor <= range[EDGE_COUNT-1])                                                   //since we are pre sorted, we can assume the last edge is most distant 
+            {
+                // [unroll]
+                for(uint l = 0; l < EDGE_COUNT; l++)
+                {
+                    duplicate                   = groupshare_address[k] == address[l];      //verify the address isnt already in the edge list
+                    
+                    if(duplicate)
+                    {
+                        break;
+                    }
+                }   
+
+                if(!duplicate)
+                {                                  
+                    [unroll]
+                    for(uint m = 0; m < EDGE_COUNT; m++)
+                    {
+                        if(range_neighbor <= range[m])                                      //search from the bottom up to find where to insert this new edge                                                 
+                        {
+                            [unroll]
+                            for(uint n = EDGE_COUNT-1; n > m; n--)
+                            {
+                                address[n]      = address[n-1];                             //bubble up the prior edges 
+                                range[n]        = range[n-1];
+                            }
+
+                            address[m]          = groupshare_address[k];                    //insert the new edge
+                            range[m]            = range_neighbor;
+                            break;
+                        }
+                    }
+                }  
+            }         
+        }
+    }
+    ////END SEARCH GROUPSHARE NEIGHBORS
+
+
+    ////SEARCH EXISTING NEIGHBOR EDGE LISTS 
+    const uint NEIGHBOR_EDGE_SEARCH_COUNT = 3 ;
+
+    StructEdge neighbor_edge[NEIGHBOR_EDGE_SEARCH_COUNT]; 
+    neighbor_edge[0] = _Edge[address[0]];
+    neighbor_edge[1] = _Edge[address[1]];    
+    neighbor_edge[2] = _Edge[address[2]];
+    
+    uint p = 0;
+    for(uint n = 0; n < NEIGHBOR_EDGE_SEARCH_COUNT; n++)
+    {
+        for(uint o = 0; o < EDGE_COUNT; o++)
+        {
+            address_neighbor    = neighbor_edge[n].address[o] % Tensor_COUNT;
+            
+            if(address_neighbor != mapped_address)     
+            {
+                range_neighbor   = measure(_Tensor[address_neighbor].position.xyz, tensor.position.xyz);
+                
+                if(range_neighbor <= range[EDGE_COUNT-1])                                                                      
+                {
+                    [unroll]
+                    for(uint l = 0; l < EDGE_COUNT; l++)
+                    {
+                        duplicate                   = address_neighbor == address[l];   
+                        
+                        if(duplicate)
+                        {
+                            break;
+                        }
+                    }   
+
+                    if(!duplicate)
+                    {                                  
+                        // [unroll]
+                        for(uint m = 0; m < EDGE_COUNT; m++)
+                        {
+                            if(range_neighbor <= range[m])                                                        
+                            {
+                                [unroll]
+                                for(uint n = EDGE_COUNT-1; n > m; n--)
+                                {
+                                    address[n]      = address[n-1];                                      
+                                    range[n]        = range[n-1];
+                                }
+
+                                address[m]          = address_neighbor;                                                
+                                range[m]            = range_neighbor;
+                                break;
+                            }
+                        }
+                    }  
+                }         
+            }
+        }
+    }
+    ////END EXISTING NEIGHBOR EDGE LISTS 
+
+    GroupMemoryBarrierWithGroupSync();  //wait until all group threads have finished again to ensure determinancy 
+ 
+    // [unroll]        
+    for(int w = 0; w < EDGE_COUNT; w++)
+    {
+        InterlockedExchange(_Edge[mapped_address].address[w], address[w] % Tensor_COUNT, address[w]);
+    }
+}
+#else
+[numthreads(1, 1, 1)]
+void Tensor(uint thread : SV_DispatchThreadID) { }
+#endif

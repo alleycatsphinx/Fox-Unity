@@ -1,0 +1,18 @@
+/Library/
+/Temp/
+/Logs/
+/UserSettings/
+/Obj/
+/Build/
+/Builds/
+/Assets/_Recovery/
+/Assets/_Recovery.meta
+.DS_Store
+*.csproj
+*.sln
+*.userprefs
+*.log
+
+# Binary datasets distributed through GitHub Releases
+/Assets/Resources/Guassians/*.bytes
+/Assets/Resources/Guassians/*.fbx

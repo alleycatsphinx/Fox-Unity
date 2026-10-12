@@ -1,0 +1,102 @@
+#pragma target 5.0
+
+#pragma kernel Oct
+
+#define OCT
+
+#include "Includes\configuration.cginc"
+#include "Includes\encoding.cginc"
+#include "Includes\bitwise.cginc"
+
+
+#ifdef OCT
+//// note - shoving in multiple bitmaps temporarialy for dev - this kernel needs to be generalized on the dispatch side to get dispatched with variable buffers 
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void Oct(uint thread : SV_DispatchThreadID)
+{	 
+	//this kernel creates the octree
+	//each thread is responsible for creating parent vertices from the child vertices of the next higher octave in the bitmap	
+	uint2 vertices_in_low		= uint2(0, 0);
+	uint2 vertices_out_low		= uint2(0, 0);
+
+	uint2 vertices_in_high		= uint2(0, 0);	
+	uint2 vertices_out_high		= uint2(0, 0);
+
+	uint address 				= thread << 3; //thread times 8 is the index into the 262144 leaves -
+
+	uint octant					= 0x000000FF;	
+	uint vertex 	 			= 0x00000000;
+	uint vertex2 	 			= 0x00000000;
+
+	//byte masks 			    
+	//any(vertices_in & 0x000000FF << (j * 8))		
+	//b ————————————————————————████████ //h 0x000000FF //d        255
+	//b ————————————————████████———————— //h 0x0000FF00 //d      65280
+	//b ————————████████———————————————— //h 0x00FF0000 //d   16711680
+	//b ████████———————————————————————— //h 0xFF000000 //d 4278190080	
+	
+	[unroll]
+	for(int i = 0; i < 8; i++)
+	{
+		vertices_in_low 		=  _Bitmap_Low[address | i];
+		vertices_in_high		= _Bitmap_High[address | i];
+
+		vertices_out_low		= any( vertices_in_low.x & 0x000000FF) ? write_64(  vertices_out_low, vertex) :  vertices_out_low; 	vertex++;
+		vertices_out_low		= any( vertices_in_low.x & 0x0000FF00) ? write_64(  vertices_out_low, vertex) :  vertices_out_low; 	vertex++;
+		vertices_out_low		= any( vertices_in_low.x & 0x00FF0000) ? write_64(  vertices_out_low, vertex) :  vertices_out_low; 	vertex++;
+		vertices_out_low		= any( vertices_in_low.x & 0xFF000000) ? write_64(  vertices_out_low, vertex) :  vertices_out_low; 	vertex++;		
+		vertices_out_low		= any( vertices_in_low.y & 0x000000FF) ? write_64(  vertices_out_low, vertex) :  vertices_out_low; 	vertex++;
+		vertices_out_low		= any( vertices_in_low.y & 0x0000FF00) ? write_64(  vertices_out_low, vertex) :  vertices_out_low; 	vertex++;
+		vertices_out_low		= any( vertices_in_low.y & 0x00FF0000) ? write_64(  vertices_out_low, vertex) :  vertices_out_low; 	vertex++;
+		vertices_out_low		= any( vertices_in_low.y & 0xFF000000) ? write_64(  vertices_out_low, vertex) :  vertices_out_low; 	vertex++;
+		vertices_out_high		= any(vertices_in_high.x & 0x000000FF) ? write_64(vertices_out_high, vertex2) : vertices_out_high; vertex2++;
+		vertices_out_high		= any(vertices_in_high.x & 0x0000FF00) ? write_64(vertices_out_high, vertex2) : vertices_out_high; vertex2++;
+		vertices_out_high		= any(vertices_in_high.x & 0x00FF0000) ? write_64(vertices_out_high, vertex2) : vertices_out_high; vertex2++;
+		vertices_out_high		= any(vertices_in_high.x & 0xFF000000) ? write_64(vertices_out_high, vertex2) : vertices_out_high; vertex2++;		
+		vertices_out_high		= any(vertices_in_high.y & 0x000000FF) ? write_64(vertices_out_high, vertex2) : vertices_out_high; vertex2++;
+		vertices_out_high		= any(vertices_in_high.y & 0x0000FF00) ? write_64(vertices_out_high, vertex2) : vertices_out_high; vertex2++;
+		vertices_out_high		= any(vertices_in_high.y & 0x00FF0000) ? write_64(vertices_out_high, vertex2) : vertices_out_high; vertex2++;
+		vertices_out_high		= any(vertices_in_high.y & 0xFF000000) ? write_64(vertices_out_high, vertex2) : vertices_out_high; vertex2++;
+	}
+	
+	// AllMemoryBarrierWithGroupSync();	
+		
+	address = thread + 262144;
+	if(address < Bitmap_Low_COUNT && thread < 37450)	
+	{
+		if(any(vertices_out_low))
+		{
+			uint prior;
+			InterlockedOr(_Bitmap_Low[address].x, vertices_out_low.x, prior);
+			InterlockedOr(_Bitmap_Low[address].y, vertices_out_low.y, prior);
+		}	
+		else
+		{
+			// _Bitmap_Low[address] = vertices_out_low;
+
+			_Bitmap_Low[address] = uint2(0x00000000, 0x00000000);
+			// uint prior;
+			// InterlockedOr(_Bitmap_Low[address].x, vertices_out_low.x, prior);
+			// InterlockedOr(_Bitmap_Low[address].y, vertices_out_low.y, prior);
+		}	
+	}
+
+	if(address < Bitmap_High_COUNT && thread < 37450)	
+	{
+		if(any(vertices_out_high))
+		{
+			uint prior;
+			InterlockedOr(_Bitmap_High[address].x, vertices_out_high.x, prior);
+			InterlockedOr(_Bitmap_High[address].y, vertices_out_high.y, prior);
+		}	
+		else
+		{
+			_Bitmap_High[address] = uint2(0x00000000, 0x00000000);
+			// _Bitmap_High[address] = vertices_out_high;
+		}
+	}
+}
+#else
+[numthreads(1, 1, 1)]
+void Oct(uint thread : SV_DispatchThreadID) { }
+#endif
